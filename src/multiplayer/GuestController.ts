@@ -31,6 +31,8 @@ import {
   HealthPickupMessage,
   DuoKillMessage,
   KillFeedEntry,
+  PickupMessage,
+  RunEndMessage,
 } from './SyncMessages';
 import { RemotePlayer } from './RemotePlayer';
 import { Player } from '../entities/Player';
@@ -88,6 +90,15 @@ export class GuestController {
   private tetherWarningUI: Phaser.GameObjects.Container | null = null;
   private tetherLine: Phaser.GameObjects.Graphics | null = null;
   private readonly TETHER_WARNING_DISTANCE = 250;
+
+  // Loot visuals mirrored from the host, keyed by loot id
+  private lootGlows: Map<string, Phaser.GameObjects.Arc> = new Map();
+  private lootRequestTimes: Map<string, number> = new Map();
+  private readonly LOOT_PICKUP_DISTANCE = 20;
+  private readonly LOOT_REQUEST_COOLDOWN_MS = 1500;
+
+  // Run end (game over / victory) guard
+  private runEnded: boolean = false;
 
   constructor(scene: Phaser.Scene, player: Player) {
     this.scene = scene;
@@ -195,6 +206,9 @@ export class GuestController {
         break;
       case MessageType.DUO_KILL:
         this.handleDuoKill(message as DuoKillMessage);
+        break;
+      case MessageType.RUN_END:
+        this.handleRunEnd(message as RunEndMessage);
         break;
       default:
         // Log unknown message types for debugging
@@ -672,6 +686,55 @@ export class GuestController {
     // Store loot reference with ID for potential sync
     lootGlow.setData('lootId', message.id);
     lootGlow.setData('lootType', lootInfo.type);
+
+    // Replace any stale visual with the same id, then track it for pickup requests
+    const existing = this.lootGlows.get(message.id);
+    if (existing && existing.active) {
+      this.scene.tweens.killTweensOf(existing);
+      existing.destroy();
+    }
+    this.lootGlows.set(message.id, lootGlow);
+  }
+
+  private removeLootGlow(lootId: string): void {
+    const glow = this.lootGlows.get(lootId);
+    if (glow) {
+      if (this.scene && this.scene.tweens) {
+        this.scene.tweens.killTweensOf(glow);
+      }
+      if (glow.active) {
+        glow.destroy();
+      }
+      this.lootGlows.delete(lootId);
+    }
+    this.lootRequestTimes.delete(lootId);
+  }
+
+  private updateLootPickupRequests(): void {
+    if (this.lootGlows.size === 0) return;
+    if (this.isDowned || this.isSpectating) return;
+    if (!this.player || !this.player.active) return;
+
+    const now = Date.now();
+
+    for (const [lootId, glow] of this.lootGlows) {
+      if (!glow || !glow.active) continue;
+
+      const dist = Phaser.Math.Distance.Between(this.player.x, this.player.y, glow.x, glow.y);
+      if (dist > this.LOOT_PICKUP_DISTANCE) continue;
+
+      const lastRequest = this.lootRequestTimes.get(lootId) ?? 0;
+      if (now - lastRequest < this.LOOT_REQUEST_COOLDOWN_MS) continue;
+
+      this.lootRequestTimes.set(lootId, now);
+
+      // Host is authoritative: ask for the pickup, it answers with LOOT_TAKEN
+      const request: PickupMessage = {
+        type: MessageType.PICKUP,
+        lootId,
+      };
+      networkManager.broadcast(request);
+    }
   }
 
   private addKillFeedEntry(killerPlayerId: string, enemyType: string): void {
@@ -704,9 +767,10 @@ export class GuestController {
   private handleLootTaken(message: LootTakenMessage): void {
     if (!this.scene || !this.scene.add || !this.scene.cameras) return;
 
-    // Find and remove the loot glow indicator
-    // Note: In a full implementation, we'd track loot sprites by ID
-    // For now, just show a notification
+    // Remove the mirrored loot visual now that the host applied the pickup
+    if (message.id) {
+      this.removeLootGlow(message.id);
+    }
 
     const isHost = message.playerId === 'host';
     const playerName = isHost ? 'Host' : 'You';
@@ -1441,6 +1505,39 @@ export class GuestController {
     }
   }
 
+  private handleRunEnd(message: RunEndMessage): void {
+    if (this.runEnded) return;
+    if (message.result !== 'gameOver' && message.result !== 'victory') return;
+
+    this.runEnded = true;
+
+    const stats = {
+      floor: typeof message.floor === 'number' ? message.floor : 1,
+      level: typeof message.level === 'number' ? message.level : this.player.level,
+      enemiesKilled: typeof message.enemiesKilled === 'number' ? message.enemiesKilled : 0,
+      itemsCollected: typeof message.itemsCollected === 'number' ? message.itemsCollected : 0,
+    };
+
+    this.destroyDownedUI();
+    this.cleanup();
+
+    const sceneName = message.result === 'victory' ? 'VictoryScene' : 'GameOverScene';
+    if (this.scene && this.scene.scene) {
+      this.scene.scene.start(sceneName, stats);
+    }
+  }
+
+  private destroyDownedUI(): void {
+    if (this.reviveProgressUI) {
+      this.reviveProgressUI.destroy();
+      this.reviveProgressUI = null;
+    }
+    if (this.downedOverlay) {
+      this.downedOverlay.destroy();
+      this.downedOverlay = null;
+    }
+  }
+
   update(): void {
     if (!networkManager.isConnected) return;
 
@@ -1476,6 +1573,9 @@ export class GuestController {
 
     // Distance tether check
     this.updateDistanceTether();
+
+    // Ask the host to grant loot we are standing on
+    this.updateLootPickupRequests();
   }
 
   private updateDistanceTether(): void {
@@ -1895,6 +1995,17 @@ export class GuestController {
       guestEnemy.healthBar.destroy();
     }
     this.guestEnemies.clear();
+
+    for (const glow of this.lootGlows.values()) {
+      if (this.scene && this.scene.tweens) {
+        this.scene.tweens.killTweensOf(glow);
+      }
+      if (glow && glow.active) {
+        glow.destroy();
+      }
+    }
+    this.lootGlows.clear();
+    this.lootRequestTimes.clear();
 
     if (this.spectateOverlay) {
       this.spectateOverlay.destroy();

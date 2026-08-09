@@ -57,8 +57,12 @@ declare global {
 }
 
 export function initTestAPI(game: Phaser.Game): void {
-  // Only in development
-  if (import.meta.env.PROD) return;
+  // Dev builds always expose it. Production builds only expose it when the page
+  // is opened with an explicit ?e2e=1 opt-in (used by the Playwright co-op
+  // smoke test, which runs against the real production bundle).
+  const e2eOptIn =
+    typeof location !== 'undefined' && new URLSearchParams(location.search).has('e2e');
+  if (import.meta.env.PROD && !e2eOptIn) return;
 
   // Helper to find the scene with a player (game scenes, not UI scenes)
   const getGameScene = () => {

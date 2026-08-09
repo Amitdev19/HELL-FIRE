@@ -15,6 +15,7 @@ export enum MessageType {
   INVENTORY_UPDATE = 'INVENTORY_UPDATE',
   SCENE_CHANGE = 'SCENE_CHANGE',
   HOST_STATE = 'HOST_STATE',
+  RUN_END = 'RUN_END',
 
   // Both directions
   PLAYER_POS = 'PLAYER_POS',
@@ -187,6 +188,15 @@ export interface PickupMessage {
   lootId: string;
 }
 
+export interface RunEndMessage {
+  type: MessageType.RUN_END;
+  result: 'gameOver' | 'victory';
+  floor: number;
+  level: number;
+  enemiesKilled: number;
+  itemsCollected: number;
+}
+
 export interface EquipItemMessage {
   type: MessageType.EQUIP_ITEM;
   itemId: string;
@@ -304,6 +314,7 @@ export type SyncMessage =
   | SceneChangeMessage
   | HostStateMessage
   | PickupMessage
+  | RunEndMessage
   | EquipItemMessage
   | UseItemMessage
   | ComboUpdateMessage

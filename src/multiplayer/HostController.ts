@@ -29,6 +29,7 @@ import {
   LevelUpMessage,
   HealthPickupMessage,
   DuoKillMessage,
+  RunEndMessage,
 } from './SyncMessages';
 import { RemotePlayer } from './RemotePlayer';
 import { Player } from '../entities/Player';
@@ -895,20 +896,41 @@ export class HostController {
   private handleGuestPickup(message: PickupMessage, _peerId: string): void {
     // Validate loot ID
     if (!message.lootId || typeof message.lootId !== 'string') return;
+    if (message.lootId.length > 64) return;
 
-    // Broadcast to all that this loot was taken by guest
-    const takenMessage: LootTakenMessage = {
-      type: MessageType.LOOT_TAKEN,
-      id: message.lootId,
-      playerId: 'guest',
-    };
-
-    networkManager.broadcast(takenMessage);
-
-    // Emit event for scene to handle actual pickup
+    // Host stays authoritative: the scene resolves and applies the pickup,
+    // then confirms it back through broadcastLootTaken()
     if (this.scene && this.scene.events) {
       this.scene.events.emit('remoteLootPickup', message.lootId);
     }
+  }
+
+  // Confirm an applied pickup so every client removes the loot visual
+  broadcastLootTaken(lootId: string, playerId: 'host' | 'guest'): void {
+    const takenMessage: LootTakenMessage = {
+      type: MessageType.LOOT_TAKEN,
+      id: lootId,
+      playerId,
+    };
+
+    networkManager.broadcast(takenMessage);
+  }
+
+  // Tell the guest that the run finished so both players end together
+  broadcastRunEnd(
+    result: RunEndMessage['result'],
+    stats: { floor: number; level: number; enemiesKilled: number; itemsCollected: number }
+  ): void {
+    const message: RunEndMessage = {
+      type: MessageType.RUN_END,
+      result,
+      floor: stats.floor,
+      level: stats.level,
+      enemiesKilled: stats.enemiesKilled,
+      itemsCollected: stats.itemsCollected,
+    };
+
+    networkManager.broadcast(message);
   }
 
   private handleGuestDamageNumber(message: DamageNumberMessage): void {

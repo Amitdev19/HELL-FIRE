@@ -99,6 +99,10 @@ export class GameScene extends BaseScene {
   private playerSync: PlayerSync | null = null;
   private killFeedUI: KillFeedUI | null = null;
   private multiplayerHUD: MultiplayerHUD | null = null;
+  private hostLootRegistry: Map<string, { lootType: string; x: number; y: number }> = new Map();
+  private lootSyncTimer: number = 0;
+  private readonly LOOT_SYNC_INTERVAL_MS = 250;
+  private readonly GOLD_PILE_RADIUS = 32;
 
   constructor() {
     super({ key: 'GameScene' });
@@ -261,10 +265,97 @@ export class GameScene extends BaseScene {
       if (networkManager.isHost) {
         console.log('[GameScene] Creating HostController');
         this.hostController = new HostController(this, this.player, this.enemies);
+
+        // Host owns loot: track spawns so guest pickup requests can be resolved
+        this.events.on('lootSpawned', this.onLootSpawnedForSync, this);
+        this.events.on('remoteLootPickup', this.onGuestLootPickupRequest, this);
       } else {
         console.log('[GameScene] Creating GuestController');
         this.guestController = new GuestController(this, this.player);
         this.guestController.setRoomManager(this.roomManager);
+      }
+    }
+  }
+
+  private onLootSpawnedForSync(lootId: string, lootType: string, x: number, y: number): void {
+    if (!lootId) return;
+    this.hostLootRegistry.set(lootId, { lootType, x, y });
+  }
+
+  private findLootSprite(lootId: string, lootType: string): Phaser.Physics.Arcade.Sprite | null {
+    const groups = this.lootDropManager.getGroups();
+    const group = lootType === 'weapon' ? groups.weapons : groups.items;
+
+    for (const child of group.getChildren()) {
+      const sprite = child as Phaser.Physics.Arcade.Sprite;
+      if (sprite.active && sprite.getData('lootId') === lootId) {
+        return sprite;
+      }
+    }
+
+    return null;
+  }
+
+  private findGoldCoins(x: number, y: number): Phaser.Physics.Arcade.Sprite[] {
+    const groups = this.lootDropManager.getGroups();
+    const coins: Phaser.Physics.Arcade.Sprite[] = [];
+
+    for (const child of groups.gold.getChildren()) {
+      const coin = child as Phaser.Physics.Arcade.Sprite;
+      if (!coin.active) continue;
+      if (Math.hypot(coin.x - x, coin.y - y) <= this.GOLD_PILE_RADIUS) {
+        coins.push(coin);
+      }
+    }
+
+    return coins;
+  }
+
+  private onGuestLootPickupRequest(lootId: string): void {
+    if (!this.hostController) return;
+
+    const entry = this.hostLootRegistry.get(lootId);
+    if (!entry) return;
+
+    let applied = false;
+
+    if (entry.lootType === 'gold') {
+      const coins = this.findGoldCoins(entry.x, entry.y);
+      for (const coin of coins) {
+        this.lootDropManager.handleGoldPickup(this.player, coin);
+        applied = true;
+      }
+    } else {
+      const sprite = this.findLootSprite(lootId, entry.lootType);
+      if (sprite) {
+        if (entry.lootType === 'weapon') {
+          this.lootDropManager.handleWeaponPickup(this.player, sprite);
+        } else {
+          this.lootDropManager.handleItemPickup(this.player, sprite);
+        }
+        applied = !sprite.active;
+      }
+    }
+
+    if (!applied) return;
+
+    this.hostLootRegistry.delete(lootId);
+    this.hostController.broadcastLootTaken(lootId, 'guest');
+    this.hostController.sendInventoryUpdate();
+    this.hostController.sendHostState();
+  }
+
+  private syncHostLootRemovals(): void {
+    if (!this.hostController || this.hostLootRegistry.size === 0) return;
+
+    for (const [lootId, entry] of this.hostLootRegistry) {
+      const stillPresent = entry.lootType === 'gold'
+        ? this.findGoldCoins(entry.x, entry.y).length > 0
+        : this.findLootSprite(lootId, entry.lootType) !== null;
+
+      if (!stillPresent) {
+        this.hostLootRegistry.delete(lootId);
+        this.hostController.broadcastLootTaken(lootId, 'host');
       }
     }
   }
@@ -441,6 +532,15 @@ export class GameScene extends BaseScene {
     this.playerSync?.update();
     this.hostController?.update(delta);
     this.guestController?.update();
+
+    // Host detects locally taken loot and clears the guest's visual
+    if (this.hostController) {
+      this.lootSyncTimer += delta;
+      if (this.lootSyncTimer >= this.LOOT_SYNC_INTERVAL_MS) {
+        this.lootSyncTimer = 0;
+        this.syncHostLootRemovals();
+      }
+    }
 
     // Update multiplayer HUD with partner info
     if (this.multiplayerHUD) {
@@ -759,6 +859,13 @@ export class GameScene extends BaseScene {
       SaveSystem.deleteSave();
     }
 
+    this.hostController?.broadcastRunEnd('gameOver', {
+      floor: stats.floor,
+      level: stats.level,
+      enemiesKilled: stats.enemiesKilled,
+      itemsCollected: stats.itemsCollected,
+    });
+
     this.registry.set('floor', 1);
     this.registry.set('enemiesKilled', 0);
     this.registry.set('itemsCollected', 0);
@@ -776,6 +883,8 @@ export class GameScene extends BaseScene {
       enemiesKilled: this.enemiesKilled,
       itemsCollected: this.itemsCollected,
     };
+
+    this.hostController?.broadcastRunEnd('victory', stats);
 
     this.registry.set('floor', 1);
     this.registry.set('enemiesKilled', 0);
@@ -838,6 +947,10 @@ export class GameScene extends BaseScene {
     this.killFeedUI?.destroy();
     this.multiplayerHUD?.destroy();
     this.events.off('killFeedEntry');
+    this.events.off('lootSpawned', this.onLootSpawnedForSync, this);
+    this.events.off('remoteLootPickup', this.onGuestLootPickupRequest, this);
+    this.hostLootRegistry.clear();
+    this.lootSyncTimer = 0;
     this.hostController = null;
     this.guestController = null;
     this.playerSync = null;
