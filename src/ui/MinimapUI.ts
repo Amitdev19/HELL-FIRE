@@ -1,0 +1,333 @@
+import Phaser from 'phaser';
+import { DungeonData, Room, RoomType } from '../systems/DungeonGenerator';
+import { TILE_SIZE } from '../utils/constants';
+
+// Colors for different room types on minimap
+const ROOM_COLORS: Record<RoomType, number> = {
+  [RoomType.NORMAL]: 0x374151,
+  [RoomType.SPAWN]: 0x374151,
+  [RoomType.EXIT]: 0x10b981,
+  [RoomType.TREASURE]: 0x6b5b1f,
+  [RoomType.TRAP]: 0x6b2020,
+  [RoomType.SHRINE]: 0x1e4a6b,
+  [RoomType.CHALLENGE]: 0x4a1e6b,
+};
+
+export class MinimapUI {
+  private graphics: Phaser.GameObjects.Graphics;
+  private dungeonData: DungeonData;
+  private scale: number = 1;
+  private padding: number = 10;
+  private viewportSize: number = 100;
+  private visitedTiles: Set<string> = new Set();
+  private visitedRooms: Set<number> = new Set();
+  private x: number;
+  private y: number;
+  private cameraWidth: number;
+  private cameraHeight: number;
+
+  // Throttling: only redraw every N frames
+  private frameCounter: number = 0;
+  private readonly UPDATE_INTERVAL: number = 3; // Update every 3 frames
+
+  // Track special object states
+  private openedChests: Set<number> = new Set(); // Room IDs with opened chests
+  private usedShrines: Set<number> = new Set(); // Room IDs with used shrines
+
+  // Cache tile-to-room mapping for fast lookups
+  private tileRoomCache: Map<string, Room | null> = new Map();
+
+  // Multiplayer partner position
+  private partnerX: number | null = null;
+  private partnerY: number | null = null;
+  private isHost: boolean = false; // Used to determine partner color
+
+  constructor(scene: Phaser.Scene, dungeonData: DungeonData) {
+    this.dungeonData = dungeonData;
+    this.buildTileRoomCache();
+
+    // Store camera dimensions for calculating visible area
+    this.cameraWidth = scene.cameras.main.width;
+    this.cameraHeight = scene.cameras.main.height;
+
+    // Position in top-right corner
+    this.x = this.cameraWidth - this.viewportSize - this.padding;
+    this.y = this.padding;
+
+    this.graphics = scene.add.graphics();
+    this.graphics.setScrollFactor(0);
+    this.graphics.setDepth(100);
+
+    // Mark spawn room as visited (reveal based on camera view)
+    this.revealVisibleArea(dungeonData.spawnPoint.x, dungeonData.spawnPoint.y);
+    this.visitedRooms.add(0); // Spawn room is room 0
+  }
+
+  // Called when a chest is opened
+  markChestOpened(roomId: number): void {
+    this.openedChests.add(roomId);
+  }
+
+  // Called when a shrine is used
+  markShrineUsed(roomId: number): void {
+    this.usedShrines.add(roomId);
+  }
+
+  // Set multiplayer partner position (world coordinates)
+  setPartnerPosition(x: number | null, y: number | null, isHost: boolean = false): void {
+    this.partnerX = x;
+    this.partnerY = y;
+    this.isHost = isHost;
+  }
+
+  // Clear partner position (partner disconnected)
+  clearPartner(): void {
+    this.partnerX = null;
+    this.partnerY = null;
+  }
+
+  update(playerX: number, playerY: number): void {
+    // Convert world position to tile position
+    const tileX = Math.floor(playerX / TILE_SIZE);
+    const tileY = Math.floor(playerY / TILE_SIZE);
+
+    // Reveal tiles based on camera viewport
+    this.revealVisibleArea(tileX, tileY);
+
+    // Track visited rooms
+    const currentRoom = this.getRoomAtTile(tileX, tileY);
+    if (currentRoom) {
+      this.visitedRooms.add(currentRoom.id);
+    }
+
+    // Throttle minimap redraws for performance
+    this.frameCounter++;
+    if (this.frameCounter >= this.UPDATE_INTERVAL) {
+      this.frameCounter = 0;
+      this.draw(tileX, tileY);
+    }
+  }
+
+  // Reveal tiles that would be visible on the player's screen
+  private revealVisibleArea(centerTileX: number, centerTileY: number): void {
+    // Calculate how many tiles are visible on screen (half in each direction from center)
+    const tilesVisibleX = Math.ceil(this.cameraWidth / TILE_SIZE / 2) + 1;
+    const tilesVisibleY = Math.ceil(this.cameraHeight / TILE_SIZE / 2) + 1;
+
+    for (let dy = -tilesVisibleY; dy <= tilesVisibleY; dy++) {
+      for (let dx = -tilesVisibleX; dx <= tilesVisibleX; dx++) {
+        const x = centerTileX + dx;
+        const y = centerTileY + dy;
+        const key = `${x},${y}`;
+        this.visitedTiles.add(key);
+      }
+    }
+  }
+
+  private buildTileRoomCache(): void {
+    // Pre-compute which room each tile belongs to
+    for (const room of this.dungeonData.rooms) {
+      for (let y = room.y; y < room.y + room.height; y++) {
+        for (let x = room.x; x < room.x + room.width; x++) {
+          this.tileRoomCache.set(`${x},${y}`, room);
+        }
+      }
+    }
+  }
+
+  private getRoomAtTile(tileX: number, tileY: number): Room | null {
+    return this.tileRoomCache.get(`${tileX},${tileY}`) || null;
+  }
+
+  private draw(playerTileX: number, playerTileY: number): void {
+    this.graphics.clear();
+
+    // Background
+    this.graphics.fillStyle(0x000000, 0.7);
+    this.graphics.fillRect(this.x - 2, this.y - 2, this.viewportSize + 4, this.viewportSize + 4);
+    this.graphics.lineStyle(1, 0x8b5cf6);
+    this.graphics.strokeRect(this.x - 2, this.y - 2, this.viewportSize + 4, this.viewportSize + 4);
+
+    // Calculate offset to center player in viewport
+    const centerOffset = this.viewportSize / 2;
+    const offsetX = this.x + centerOffset - playerTileX * this.scale;
+    const offsetY = this.y + centerOffset - playerTileY * this.scale;
+
+    // Only iterate through tiles visible in the minimap viewport (not all visited tiles)
+    const tilesInView = Math.ceil(this.viewportSize / this.scale) + 2;
+    const startTileX = playerTileX - Math.floor(tilesInView / 2);
+    const startTileY = playerTileY - Math.floor(tilesInView / 2);
+
+    for (let dy = 0; dy < tilesInView; dy++) {
+      for (let dx = 0; dx < tilesInView; dx++) {
+        const tx = startTileX + dx;
+        const ty = startTileY + dy;
+        const key = `${tx},${ty}`;
+
+        // Only draw if this tile has been visited
+        if (!this.visitedTiles.has(key)) continue;
+
+        // Check if this tile is a floor
+        if (this.dungeonData.tiles[ty] && this.dungeonData.tiles[ty][tx] === 0) {
+          const drawX = offsetX + tx * this.scale;
+          const drawY = offsetY + ty * this.scale;
+
+          // Get room color based on room type
+          const room = this.getRoomAtTile(tx, ty);
+          const color = room ? ROOM_COLORS[room.type] : 0x374151;
+          this.graphics.fillStyle(color);
+          this.graphics.fillRect(drawX, drawY, this.scale, this.scale);
+        }
+      }
+    }
+
+    // Draw special room icons for visited rooms
+    for (const room of this.dungeonData.rooms) {
+      if (!this.visitedRooms.has(room.id)) continue;
+
+      const iconX = offsetX + room.centerX * this.scale;
+      const iconY = offsetY + room.centerY * this.scale;
+
+      // Only draw if within viewport
+      if (iconX < this.x || iconX >= this.x + this.viewportSize ||
+          iconY < this.y || iconY >= this.y + this.viewportSize) {
+        continue;
+      }
+
+      switch (room.type) {
+        case RoomType.TREASURE:
+          // Chest icon - gold box, gray if opened
+          const chestColor = this.openedChests.has(room.id) ? 0x666666 : 0xffd700;
+          this.graphics.fillStyle(chestColor);
+          this.graphics.fillRect(iconX - 2, iconY - 1, 4, 3);
+          this.graphics.fillStyle(0x8b4513);
+          this.graphics.fillRect(iconX - 2, iconY - 2, 4, 1);
+          break;
+
+        case RoomType.SHRINE:
+          // Shrine icon - cyan diamond, gray if used
+          const shrineColor = this.usedShrines.has(room.id) ? 0x666666 : 0x22d3ee;
+          this.graphics.fillStyle(shrineColor);
+          this.graphics.fillTriangle(
+            iconX, iconY - 3,
+            iconX - 2, iconY,
+            iconX + 2, iconY
+          );
+          this.graphics.fillTriangle(
+            iconX, iconY + 3,
+            iconX - 2, iconY,
+            iconX + 2, iconY
+          );
+          break;
+
+        case RoomType.CHALLENGE:
+          // Skull icon - purple circle
+          this.graphics.fillStyle(0xaa00ff);
+          this.graphics.fillCircle(iconX, iconY, 3);
+          break;
+
+        case RoomType.TRAP:
+          // Danger icon - red triangle
+          this.graphics.fillStyle(0xff4444);
+          this.graphics.fillTriangle(
+            iconX, iconY - 3,
+            iconX - 3, iconY + 2,
+            iconX + 3, iconY + 2
+          );
+          break;
+
+        case RoomType.EXIT:
+          // Stairs icon - green arrow down
+          this.graphics.fillStyle(0x10b981);
+          this.graphics.fillTriangle(
+            iconX, iconY + 3,
+            iconX - 3, iconY - 1,
+            iconX + 3, iconY - 1
+          );
+          this.graphics.fillRect(iconX - 1, iconY - 3, 2, 2);
+          break;
+      }
+    }
+
+    // Draw partner dot if in multiplayer
+    if (this.partnerX !== null && this.partnerY !== null) {
+      const partnerTileX = Math.floor(this.partnerX / TILE_SIZE);
+      const partnerTileY = Math.floor(this.partnerY / TILE_SIZE);
+      const partnerDrawX = offsetX + partnerTileX * this.scale;
+      const partnerDrawY = offsetY + partnerTileY * this.scale;
+
+      // Check if partner is within minimap viewport
+      if (partnerDrawX >= this.x && partnerDrawX <= this.x + this.viewportSize &&
+          partnerDrawY >= this.y && partnerDrawY <= this.y + this.viewportSize) {
+        // Partner color: blue for helper (host sees), green for host (guest sees)
+        const partnerColor = this.isHost ? 0x88aaff : 0x88ff88;
+        this.graphics.fillStyle(partnerColor);
+        this.graphics.fillCircle(partnerDrawX, partnerDrawY, 3);
+        // Darker outline for visibility
+        this.graphics.lineStyle(1, 0x000000);
+        this.graphics.strokeCircle(partnerDrawX, partnerDrawY, 3);
+      } else {
+        // Partner is off-screen - draw arrow pointing to them at edge
+        this.drawOffscreenIndicator(
+          partnerDrawX, partnerDrawY, centerOffset,
+          this.isHost ? 0x88aaff : 0x88ff88
+        );
+      }
+    }
+
+    // Draw player dot (always centered)
+    this.graphics.fillStyle(0x8b5cf6);
+    this.graphics.fillCircle(
+      this.x + centerOffset,
+      this.y + centerOffset,
+      3
+    );
+    // White outline for visibility
+    this.graphics.lineStyle(1, 0xffffff);
+    this.graphics.strokeCircle(
+      this.x + centerOffset,
+      this.y + centerOffset,
+      3
+    );
+  }
+
+  // Draw a small arrow at the edge of the minimap pointing toward off-screen partner
+  private drawOffscreenIndicator(
+    targetX: number,
+    targetY: number,
+    centerOffset: number,
+    color: number
+  ): void {
+    const centerX = this.x + centerOffset;
+    const centerY = this.y + centerOffset;
+
+    // Calculate angle from center to target
+    const angle = Math.atan2(targetY - centerY, targetX - centerX);
+
+    // Calculate edge position (where the indicator should appear)
+    const maxDist = (this.viewportSize / 2) - 5;
+    const edgeX = centerX + Math.cos(angle) * maxDist;
+    const edgeY = centerY + Math.sin(angle) * maxDist;
+
+    // Clamp to minimap bounds
+    const clampedX = Math.max(this.x + 5, Math.min(this.x + this.viewportSize - 5, edgeX));
+    const clampedY = Math.max(this.y + 5, Math.min(this.y + this.viewportSize - 5, edgeY));
+
+    // Draw small triangle pointing in the direction
+    this.graphics.fillStyle(color);
+    const arrowSize = 4;
+    const tip1X = clampedX + Math.cos(angle) * arrowSize;
+    const tip1Y = clampedY + Math.sin(angle) * arrowSize;
+    const perpAngle = angle + Math.PI / 2;
+    const base1X = clampedX + Math.cos(perpAngle) * (arrowSize * 0.6);
+    const base1Y = clampedY + Math.sin(perpAngle) * (arrowSize * 0.6);
+    const base2X = clampedX - Math.cos(perpAngle) * (arrowSize * 0.6);
+    const base2Y = clampedY - Math.sin(perpAngle) * (arrowSize * 0.6);
+
+    this.graphics.fillTriangle(tip1X, tip1Y, base1X, base1Y, base2X, base2Y);
+  }
+
+  destroy(): void {
+    this.graphics.destroy();
+  }
+}

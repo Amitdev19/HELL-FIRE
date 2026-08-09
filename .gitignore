@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Git worktrees
+.worktrees/
+
+# Playwright
+.playwright-mcp/
+# Large build artifact / releases
+hell-fire-pc.zip
+*.zip
+# Capacitor Android project (generated)
+android/
+
+
+.git.bak/
+.git/

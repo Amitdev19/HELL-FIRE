@@ -1,0 +1,13 @@
+node_modules
+dist
+server/dist
+*.log
+.DS_Store
+.env
+.env.local
+.env.*.local
+.vite
+.git
+.gitignore
+android
+scripts

@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HELL FIRE - Download</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      background: #0a0a0a;
+      color: #fff;
+      font-family: 'Courier New', monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      background-image:
+        radial-gradient(circle at 20% 30%, rgba(255,102,0,0.08) 0%, transparent 50%),
+        radial-gradient(circle at 80% 70%, rgba(255,36,0,0.06) 0%, transparent 50%);
+    }
+    .title {
+      font-size: clamp(36px, 8vw, 64px);
+      font-family: 'Cinzel', Georgia, serif;
+      color: #ff6600;
+      text-align: center;
+      letter-spacing: 6px;
+      text-shadow: 0 0 30px rgba(255,102,0,0.4), 0 0 60px rgba(255,36,0,0.2);
+      margin-bottom: 8px;
+    }
+    .subtitle {
+      color: #666;
+      font-size: 14px;
+      margin-bottom: 48px;
+      text-align: center;
+    }
+    .container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 24px;
+      justify-content: center;
+      max-width: 800px;
+      width: 100%;
+    }
+    .card {
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 12px;
+      padding: 32px 28px;
+      flex: 1;
+      min-width: 260px;
+      max-width: 360px;
+      text-align: center;
+      transition: border-color 0.3s, box-shadow 0.3s;
+    }
+    .card:hover {
+      border-color: #ff6600;
+      box-shadow: 0 0 30px rgba(255,102,0,0.15);
+    }
+    .icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+    .platform {
+      font-size: 20px;
+      font-weight: bold;
+      color: #ffcc00;
+      margin-bottom: 8px;
+    }
+    .desc {
+      color: #888;
+      font-size: 13px;
+      margin-bottom: 20px;
+      line-height: 1.5;
+    }
+    .file-size {
+      color: #555;
+      font-size: 11px;
+      margin-bottom: 20px;
+    }
+    .btn {
+      display: inline-block;
+      padding: 12px 32px;
+      background: #ff6600;
+      color: #000;
+      text-decoration: none;
+      font-weight: bold;
+      font-size: 14px;
+      border-radius: 6px;
+      transition: background 0.2s, transform 0.1s;
+      cursor: pointer;
+      border: none;
+    }
+    .btn:hover {
+      background: #ff8833;
+      transform: scale(1.03);
+    }
+    .btn:active {
+      transform: scale(0.98);
+    }
+    .btn-secondary {
+      background: #1a1a2e;
+      color: #ffcc00;
+      border: 1px solid #ff6600;
+      margin-top: 12px;
+    }
+    .btn-secondary:hover {
+      background: #2a1a3e;
+    }
+    .footer {
+      margin-top: 48px;
+      color: #444;
+      font-size: 11px;
+      text-align: center;
+      line-height: 1.8;
+    }
+    .footer a {
+      color: #666;
+      text-decoration: none;
+    }
+    .note {
+      color: #555;
+      font-size: 11px;
+      margin-top: 12px;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="title">HELL FIRE</div>
+  <div class="subtitle">A roguelike action RPG — Co-op Multiplayer Enabled</div>
+
+  <div class="container">
+    <!-- PC -->
+    <div class="card">
+      <div class="icon">🖥️</div>
+      <div class="platform">PC / Windows</div>
+      <div class="desc">
+        Download the full game package. Extract and run <strong>play.bat</strong>.
+      </div>
+      <div class="file-size">📦 ZIP — ~81 MB</div>
+      <a class="btn" href="hell-fire-pc.zip" download>⬇ Download for PC</a>
+      <div class="note">Requires Node.js 22+ (installer included in package)</div>
+    </div>
+
+    <!-- Android -->
+    <div class="card">
+      <div class="icon">📱</div>
+      <div class="platform">Android</div>
+      <div class="desc">
+        Install the APK directly on your phone. Tap to download, then open to install.
+      </div>
+      <div class="file-size" id="apk-size">📲 APK — Build in progress</div>
+      <a class="btn" id="apk-btn" href="hell-fire-android.apk" download>⬇ Download APK</a>
+      <div class="note">Enable "Install unknown apps" if prompted</div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <strong style="color:#888;">Created by devils_call</strong><br />
+    <a href="https://github.com/devils_call/hell-fire" target="_blank">GitHub</a>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/devils_call/hell-fire/blob/main/LICENSE" target="_blank">MIT License</a>
+    <br /><br />
+    <span style="color:#333;">
+      For co-op, both players need to be on the same WiFi.<br />
+      Host opens play.bat → guest joins with the room code.
+    </span>
+  </div>
+
+  <script>
+    // Check if APK exists (simple heuristic: fetch HEAD)
+    fetch('hell-fire-android.apk', { method: 'HEAD' })
+      .then(r => {
+        if (r.ok) {
+          document.getElementById('apk-size').textContent = '📲 APK — ~25 MB';
+          document.getElementById('apk-btn').style.display = 'inline-block';
+        } else {
+          document.getElementById('apk-size').textContent = '📲 APK — Not yet built';
+          document.getElementById('apk-btn').style.display = 'none';
+        }
+      })
+      .catch(() => {
+        document.getElementById('apk-size').textContent = '📲 APK — Not yet built';
+        document.getElementById('apk-btn').style.display = 'none';
+      });
+  </script>
+</body>
+</html>

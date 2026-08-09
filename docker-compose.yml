@@ -1,0 +1,11 @@
+# HELL FIRE — one-process game host + co-op relay.
+# Players just open the URL; no install needed.
+services:
+  hell-fire:
+    build: .
+    image: hell-fire:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+    restart: unless-stopped

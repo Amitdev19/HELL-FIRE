@@ -1,0 +1,14 @@
+# Render.com — Web Service (Docker)
+# Build: Dockerfile (auto-detected). Start: npm start (set in Dockerfile CMD).
+# Render exposes the port via $PORT automatically.
+
+services:
+  - type: web
+    name: hell-fire
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        sync: false   # Render injects this automatically

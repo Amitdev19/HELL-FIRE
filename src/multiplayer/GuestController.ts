@@ -1,0 +1,1930 @@
+// src/multiplayer/GuestController.ts
+
+import Phaser from 'phaser';
+import { networkManager } from './NetworkManager';
+import {
+  MessageType,
+  SyncMessage,
+  PlayerPosMessage,
+  PlayerAttackMessage,
+  PlayerHitMessage,
+  EnemyUpdateMessage,
+  HostStateMessage,
+  InventoryUpdateMessage,
+  RoomClearMessage,
+  RoomActivatedMessage,
+  PlayerDiedMessage,
+  PlayerReviveMessage,
+  SceneChangeMessage,
+  EnemyDeathMessage,
+  LootSpawnMessage,
+  LootTakenMessage,
+  DamageNumberMessage,
+  ComboUpdateMessage,
+  PlayerDownedMessage,
+  ReviveProgressMessage,
+  ReviveCompleteMessage,
+  PingMarkerMessage,
+  XpGainedMessage,
+  EmoteMessage,
+  LevelUpMessage,
+  HealthPickupMessage,
+  DuoKillMessage,
+  KillFeedEntry,
+} from './SyncMessages';
+import { RemotePlayer } from './RemotePlayer';
+import { Player } from '../entities/Player';
+import { RoomManager } from '../systems/RoomManager';
+import { mpLog } from './DebugLogger';
+
+interface GuestEnemy {
+  sprite: Phaser.Physics.Arcade.Sprite;
+  healthBar: Phaser.GameObjects.Container;
+  id: string;
+  hp: number;
+  maxHp: number;
+  targetX: number;
+  targetY: number;
+  lastUpdateTime: number;
+  facing: string;
+}
+
+export class GuestController {
+  private scene: Phaser.Scene;
+  private player: Player;
+  private hostPlayer: RemotePlayer | null = null;
+  private guestEnemies: Map<string, GuestEnemy> = new Map();
+  private roomManager: RoomManager | null = null;
+
+  private isSpectating: boolean = false;
+  private spectateOverlay: Phaser.GameObjects.Container | null = null;
+
+  // Track last safe position (where host is or was)
+  private lastSafeX: number = 0;
+  private lastSafeY: number = 0;
+  private visitedRoomIds: Set<number> = new Set([0]); // Spawn room is always safe
+
+  // Network listener ID for cleanup
+  private messageListenerId: string | null = null;
+
+  // Kill feed for co-op UI
+  private killFeed: KillFeedEntry[] = [];
+  private readonly KILL_FEED_MAX_ENTRIES = 5;
+  private readonly KILL_FEED_DURATION_MS = 5000;
+
+  // Revive system
+  private isDowned: boolean = false;
+  private reviveProgressUI: Phaser.GameObjects.Container | null = null;
+  private downedOverlay: Phaser.GameObjects.Container | null = null;
+
+  // Proximity buff system
+  private proximityBuffActive: boolean = false;
+  private proximityBuffUI: Phaser.GameObjects.Container | null = null;
+  private readonly PROXIMITY_BUFF_DISTANCE = 100;
+  private readonly PROXIMITY_BUFF_MULTIPLIER = 1.15;
+
+  // Distance tether warning
+  private isTooFar: boolean = false;
+  private tetherWarningUI: Phaser.GameObjects.Container | null = null;
+  private tetherLine: Phaser.GameObjects.Graphics | null = null;
+  private readonly TETHER_WARNING_DISTANCE = 250;
+
+  constructor(scene: Phaser.Scene, player: Player) {
+    this.scene = scene;
+    this.player = player;
+    this.lastSafeX = player.x;
+    this.lastSafeY = player.y;
+
+    this.setupMessageHandlers();
+    this.createHostPlayer();
+  }
+
+  setRoomManager(roomManager: RoomManager): void {
+    this.roomManager = roomManager;
+  }
+
+  private setupMessageHandlers(): void {
+    this.messageListenerId = networkManager.onMessage((message, peerId) => {
+      this.handleMessage(message, peerId);
+    });
+
+    networkManager.onPeerLeave(() => {
+      this.onHostDisconnected();
+    });
+  }
+
+  private createHostPlayer(): void {
+    this.hostPlayer = new RemotePlayer(
+      this.scene,
+      this.player.x - 50,
+      this.player.y,
+      false // not helper, this is the host
+    );
+  }
+
+  private handleMessage(message: SyncMessage, _peerId: string): void {
+    switch (message.type) {
+      case MessageType.PLAYER_POS:
+        this.handleHostPosition(message as PlayerPosMessage);
+        break;
+      case MessageType.ENEMY_UPDATE:
+        this.handleEnemyUpdate(message as EnemyUpdateMessage);
+        break;
+      case MessageType.HOST_STATE:
+        this.handleHostState(message as HostStateMessage);
+        break;
+      case MessageType.INVENTORY_UPDATE:
+        this.handleInventoryUpdate(message as InventoryUpdateMessage);
+        break;
+      case MessageType.ROOM_CLEAR:
+        this.handleRoomClear(message as RoomClearMessage);
+        break;
+      case MessageType.PLAYER_DIED:
+        this.handlePlayerDied(message as PlayerDiedMessage);
+        break;
+      case MessageType.PLAYER_REVIVE:
+        this.handlePlayerRevive(message as PlayerReviveMessage);
+        break;
+      case MessageType.SCENE_CHANGE:
+        this.handleSceneChange(message as SceneChangeMessage);
+        break;
+      case MessageType.PLAYER_ATTACK:
+        this.handleHostAttack(message as PlayerAttackMessage);
+        break;
+      case MessageType.PLAYER_HIT:
+        this.handlePlayerHit(message as PlayerHitMessage);
+        break;
+      case MessageType.ROOM_ACTIVATED:
+        this.handleRoomActivated(message as RoomActivatedMessage);
+        break;
+      case MessageType.ENEMY_DEATH:
+        this.handleEnemyDeath(message as EnemyDeathMessage);
+        break;
+      case MessageType.LOOT_SPAWN:
+        this.handleLootSpawn(message as LootSpawnMessage);
+        break;
+      case MessageType.DAMAGE_NUMBER:
+        this.handleDamageNumber(message as DamageNumberMessage);
+        break;
+      case MessageType.LOOT_TAKEN:
+        this.handleLootTaken(message as LootTakenMessage);
+        break;
+      case MessageType.COMBO_UPDATE:
+        this.handleComboUpdate(message as ComboUpdateMessage);
+        break;
+      case MessageType.PING_MARKER:
+        this.handlePingMarker(message as PingMarkerMessage);
+        break;
+      case MessageType.REVIVE_PROGRESS:
+        this.handleReviveProgress(message as ReviveProgressMessage);
+        break;
+      case MessageType.REVIVE_COMPLETE:
+        this.handleReviveComplete(message as ReviveCompleteMessage);
+        break;
+      case MessageType.XP_GAINED:
+        this.handleXpGained(message as XpGainedMessage);
+        break;
+      case MessageType.EMOTE:
+        this.handleEmote(message as EmoteMessage);
+        break;
+      case MessageType.LEVEL_UP:
+        this.handleLevelUp(message as LevelUpMessage);
+        break;
+      case MessageType.HEALTH_PICKUP:
+        this.handleHealthPickup(message as HealthPickupMessage);
+        break;
+      case MessageType.DUO_KILL:
+        this.handleDuoKill(message as DuoKillMessage);
+        break;
+      default:
+        // Log unknown message types for debugging
+        mpLog.debug('Guest', `Unknown message type: ${(message as SyncMessage).type}`);
+    }
+  }
+
+  private handleHostPosition(message: PlayerPosMessage): void {
+    if (this.hostPlayer) {
+      this.hostPlayer.applyPositionUpdate(message);
+    }
+  }
+
+  private handleHostAttack(message: PlayerAttackMessage): void {
+    // Render visual projectile for host's attack
+    if (!this.hostPlayer || !this.scene) return;
+
+    const x = typeof message.x === 'number' && !isNaN(message.x) ? message.x : this.hostPlayer.x;
+    const y = typeof message.y === 'number' && !isNaN(message.y) ? message.y : this.hostPlayer.y;
+    const angle = typeof message.angle === 'number' && !isNaN(message.angle) ? message.angle : 0;
+    const attackType = message.attackType?.toLowerCase() || 'wand';
+
+    const attackConfig: Record<string, { texture: string; speed: number; duration: number; scale?: number }> = {
+      wand:     { texture: 'projectile_wand',   speed: 300, duration: 500 },
+      bow:      { texture: 'projectile_arrow',  speed: 500, duration: 400 },
+      staff:    { texture: 'projectile_staff',  speed: 250, duration: 600 },
+      daggers:  { texture: 'projectile_dagger', speed: 450, duration: 350 },
+      sword:    { texture: 'projectile_sword',  speed: 280, duration: 250, scale: 1.2 },
+    };
+
+    const config = attackConfig[attackType] || attackConfig.wand;
+
+    const projectile = this.scene.add.sprite(x, y, config.texture);
+    projectile.setDepth(8);
+    projectile.setRotation(angle);
+    if (config.scale) projectile.setScale(config.scale);
+
+    this.scene.tweens.add({
+      targets: projectile,
+      x: x + Math.cos(angle) * config.speed,
+      y: y + Math.sin(angle) * config.speed,
+      alpha: 0,
+      duration: config.duration,
+      onComplete: () => {
+        if (projectile && projectile.active) {
+          projectile.destroy();
+        }
+      },
+    });
+
+    this.hostPlayer.applyAttack(message);
+  }
+
+  private handlePlayerHit(message: PlayerHitMessage): void {
+    // Handle hit event from host - this is sent when any player (host or guest) hits an enemy
+    // The host authoritative system already applied the damage, this is just for visual sync
+    if (!this.scene) return;
+
+    // Find the enemy by network ID and apply visual hit effect
+    const guestEnemy = this.guestEnemies.get(message.enemyId);
+    if (guestEnemy && guestEnemy.sprite && guestEnemy.sprite.active) {
+      // Flash the enemy sprite to show it was hit
+      this.scene.tweens.add({
+        targets: guestEnemy.sprite,
+        tint: 0xff0000,
+        duration: 100,
+        yoyo: true,
+        onComplete: () => {
+          if (guestEnemy.sprite && guestEnemy.sprite.active) {
+            guestEnemy.sprite.clearTint();
+          }
+        },
+      });
+
+      mpLog.debug('Guest', 'Applied hit effect to enemy', { enemyId: message.enemyId, damage: message.damage });
+    }
+  }
+
+  private handleEnemyUpdate(message: EnemyUpdateMessage): void {
+    // Scene safety check - required for sprite creation
+    if (!this.scene || !this.scene.physics || !this.scene.textures) return;
+
+    // Debug: log when receiving enemy updates
+    if (message.enemies.length > 0 && this.guestEnemies.size === 0) {
+      mpLog.info('Guest', `First enemy update received: ${message.enemies.length} enemies`);
+    }
+
+    const seenIds = new Set<string>();
+
+    for (const enemyData of message.enemies) {
+      // Validate enemy data
+      if (!enemyData.id || typeof enemyData.id !== 'string') continue;
+      const x = typeof enemyData.x === 'number' && !isNaN(enemyData.x) ? enemyData.x : 0;
+      const y = typeof enemyData.y === 'number' && !isNaN(enemyData.y) ? enemyData.y : 0;
+      const hp = typeof enemyData.hp === 'number' && !isNaN(enemyData.hp) ? Math.max(0, enemyData.hp) : 0;
+      const maxHp = typeof enemyData.maxHp === 'number' && enemyData.maxHp > 0 ? enemyData.maxHp : 100;
+
+      seenIds.add(enemyData.id);
+
+      let guestEnemy = this.guestEnemies.get(enemyData.id);
+
+      if (!guestEnemy) {
+        // Validate texture exists before creating sprite
+        const textureKey = this.scene.textures.exists(enemyData.texture)
+          ? enemyData.texture
+          : 'enemy'; // Fallback to default enemy texture
+
+        // Create new enemy sprite with correct texture
+        const sprite = this.scene.physics.add.sprite(
+          x,
+          y,
+          textureKey
+        );
+        sprite.setDepth(5);
+        sprite.setPipeline('Light2D');
+
+        // Enable physics body with proper size for collisions
+        if (sprite.body) {
+          const body = sprite.body as Phaser.Physics.Arcade.Body;
+          body.setSize(16, 16);
+          body.setOffset(
+            (sprite.width - 16) / 2,
+            (sprite.height - 16) / 2
+          );
+          body.setImmovable(false);
+        }
+
+        // Store enemy data on the sprite for collision handling
+        sprite.setData('enemyId', enemyData.id);
+        sprite.setData('hp', hp);
+        sprite.setData('maxHp', maxHp);
+
+        // Create health bar
+        const healthBar = this.createHealthBar(x, y);
+
+        guestEnemy = {
+          sprite,
+          healthBar,
+          id: enemyData.id,
+          hp,
+          maxHp,
+          targetX: x,
+          targetY: y,
+          lastUpdateTime: Date.now(),
+          facing: enemyData.facing || 'south',
+        };
+        this.guestEnemies.set(enemyData.id, guestEnemy);
+
+        // Apply initial facing
+        this.applyFacingToSprite(sprite, guestEnemy.facing);
+      }
+
+      // Store target position for smooth interpolation in update()
+      guestEnemy.targetX = x;
+      guestEnemy.targetY = y;
+      guestEnemy.lastUpdateTime = Date.now();
+      guestEnemy.hp = hp;
+      guestEnemy.maxHp = maxHp;
+
+      // Update facing if changed
+      const newFacing = enemyData.facing || 'south';
+      if (newFacing !== guestEnemy.facing) {
+        guestEnemy.facing = newFacing;
+        this.applyFacingToSprite(guestEnemy.sprite, newFacing);
+      }
+
+      // Update sprite data for collision handling
+      guestEnemy.sprite.setData('hp', hp);
+      guestEnemy.sprite.setData('maxHp', maxHp);
+
+      // Update health bar position and width
+      this.updateHealthBar(guestEnemy);
+
+      // Visual feedback for dead enemies
+      if (hp <= 0) {
+        guestEnemy.sprite.setAlpha(0);
+        guestEnemy.healthBar.setVisible(false);
+      }
+    }
+
+    // Remove enemies that weren't in the update
+    for (const [id, guestEnemy] of this.guestEnemies.entries()) {
+      if (!seenIds.has(id)) {
+        guestEnemy.sprite.destroy();
+        guestEnemy.healthBar.destroy();
+        this.guestEnemies.delete(id);
+      }
+    }
+  }
+
+  private createHealthBar(x: number, y: number): Phaser.GameObjects.Container {
+    const container = this.scene.add.container(x, y - 15);
+    container.setDepth(50);
+
+    const bg = this.scene.add.rectangle(0, 0, 20, 4, 0x333333);
+    const bar = this.scene.add.rectangle(-10, 0, 20, 4, 0x22cc22);
+    bar.setOrigin(0, 0.5);
+    bar.setName('bar');
+
+    container.add([bg, bar]);
+    return container;
+  }
+
+  private applyFacingToSprite(sprite: Phaser.Physics.Arcade.Sprite, facing: string): void {
+    sprite.setFlipX(false);
+    if (facing === 'west' || facing === 'north_west' || facing === 'south_west') {
+      sprite.setFlipX(true);
+    }
+  }
+
+  private updateHealthBar(guestEnemy: GuestEnemy): void {
+    guestEnemy.healthBar.setPosition(guestEnemy.sprite.x, guestEnemy.sprite.y - 15);
+
+    const bar = guestEnemy.healthBar.getByName('bar') as Phaser.GameObjects.Rectangle;
+    if (bar) {
+      // Prevent division by zero
+      const percent = guestEnemy.maxHp > 0 ? guestEnemy.hp / guestEnemy.maxHp : 0;
+      bar.width = 20 * Math.max(0, percent);
+
+      // Color based on health
+      if (percent > 0.5) bar.setFillStyle(0x22cc22);
+      else if (percent > 0.25) bar.setFillStyle(0xcccc22);
+      else bar.setFillStyle(0xcc2222);
+    }
+  }
+
+  private handleHostState(message: HostStateMessage): void {
+    // Validate incoming values
+    const maxHp = typeof message.maxHp === 'number' && message.maxHp > 0 ? message.maxHp : 100;
+    const level = typeof message.level === 'number' && message.level > 0 ? message.level : 1;
+    const gold = typeof message.gold === 'number' && message.gold >= 0 ? message.gold : 0;
+
+    // Update helper stats based on host
+    const ratio = 0.75;
+    this.player.maxHp = Math.floor(maxHp * ratio);
+    this.player.hp = Math.min(this.player.hp, this.player.maxHp);
+    this.player.level = level;
+    this.player.gold = gold;
+  }
+
+  private handleInventoryUpdate(message: InventoryUpdateMessage): void {
+    try {
+      this.player.inventory.deserialize(message.inventorySerialized);
+      // Validate gold value
+      const gold = typeof message.gold === 'number' && message.gold >= 0 ? message.gold : 0;
+      this.player.gold = gold;
+      this.player.recalculateStats();
+    } catch (error) {
+      mpLog.error('Guest', 'Failed to deserialize inventory', error);
+    }
+  }
+
+  private handleRoomClear(_message: RoomClearMessage): void {
+    // Exit spectate mode if we were dead
+    if (this.isSpectating) {
+      this.exitSpectateMode();
+    }
+
+    // Show notification for guest
+    this.showRoomClearedNotification();
+  }
+
+  private showRoomClearedNotification(): void {
+    if (!this.scene || !this.scene.add || !this.scene.cameras) return;
+
+    const cam = this.scene.cameras.main;
+    const text = this.scene.add.text(cam.width / 2, cam.height / 2 - 50, 'ROOM CLEARED!', {
+      fontSize: '24px',
+      fontFamily: 'Cinzel, Georgia, serif',
+      color: '#44ff44',
+      stroke: '#000000',
+      strokeThickness: 4,
+    });
+    text.setOrigin(0.5);
+    text.setScrollFactor(0);
+    text.setDepth(200);
+    text.setAlpha(0);
+
+    // Animate in
+    this.scene.tweens.add({
+      targets: text,
+      alpha: 1,
+      y: cam.height / 2 - 60,
+      duration: 300,
+      ease: 'Cubic.easeOut',
+      onComplete: () => {
+        // Hold then fade out
+        this.scene.time.delayedCall(1000, () => {
+          this.scene.tweens.add({
+            targets: text,
+            alpha: 0,
+            y: cam.height / 2 - 80,
+            duration: 500,
+            ease: 'Cubic.easeIn',
+            onComplete: () => {
+              if (text && text.active) text.destroy();
+            },
+          });
+        });
+      },
+    });
+  }
+
+  private handlePlayerDied(message: PlayerDiedMessage): void {
+    // If it's us, enter spectate mode
+    if (message.playerId === networkManager.peerId) {
+      this.enterSpectateMode();
+    }
+  }
+
+  private handlePlayerRevive(message: PlayerReviveMessage): void {
+    if (message.playerId === networkManager.peerId) {
+      // Validate position values
+      const x = typeof message.x === 'number' && !isNaN(message.x) ? message.x : this.player.x;
+      const y = typeof message.y === 'number' && !isNaN(message.y) ? message.y : this.player.y;
+
+      this.exitSpectateMode();
+      this.player.setPosition(x, y);
+      this.player.hp = this.player.maxHp;
+    }
+  }
+
+  // Valid scene names that can be transitioned to
+  private static readonly VALID_SCENES = new Set([
+    'GameScene',
+    'HubScene',
+    'MenuScene',
+    'ShopScene',
+    'VictoryScene',
+    'GameOverScene',
+  ]);
+
+  private handleSceneChange(message: SceneChangeMessage): void {
+    // Validate scene name to prevent arbitrary scene transitions
+    if (!message.sceneName || !GuestController.VALID_SCENES.has(message.sceneName)) {
+      mpLog.warn('Guest', `Invalid scene name: ${message.sceneName}`);
+      return;
+    }
+
+    this.cleanup();
+    if (this.scene && this.scene.scene) {
+      this.scene.scene.start(message.sceneName, message.data);
+    }
+  }
+
+  private handleRoomActivated(message: RoomActivatedMessage): void {
+    // Validate position values
+    const hostX = typeof message.hostX === 'number' && !isNaN(message.hostX) ? message.hostX : this.player.x;
+    const hostY = typeof message.hostY === 'number' && !isNaN(message.hostY) ? message.hostY : this.player.y;
+    const roomId = typeof message.roomId === 'number' ? message.roomId : 0;
+
+    // Mark the room as visited by host
+    this.visitedRoomIds.add(roomId);
+    this.lastSafeX = hostX;
+    this.lastSafeY = hostY;
+
+    // Teleport guest player to host position when room is activated
+    this.player.setPosition(hostX + 20, hostY);
+    this.player.setVelocity(0, 0);
+
+    // Visual feedback for teleport - with safe cleanup
+    if (!this.scene || !this.scene.add || !this.scene.tweens) return;
+    const flash = this.scene.add.circle(this.player.x, this.player.y, 30, 0x88aaff, 0.6);
+    flash.setDepth(50);
+    this.scene.tweens.add({
+      targets: flash,
+      alpha: 0,
+      scale: 2,
+      duration: 300,
+      onComplete: () => {
+        if (flash && flash.active) {
+          flash.destroy();
+        }
+      },
+    });
+  }
+
+  private handleEnemyDeath(message: EnemyDeathMessage): void {
+    if (!this.scene || !this.scene.add || !this.scene.tweens) return;
+
+    // Remove enemy from our tracking
+    const guestEnemy = this.guestEnemies.get(message.id);
+    if (guestEnemy) {
+      // Death animation matching host's visual effects
+      this.scene.tweens.add({
+        targets: guestEnemy.sprite,
+        alpha: 0,
+        scale: 0.5,
+        duration: 200,
+        onComplete: () => {
+          if (guestEnemy.sprite && guestEnemy.sprite.active) {
+            guestEnemy.sprite.destroy();
+          }
+          if (guestEnemy.healthBar && guestEnemy.healthBar.active) {
+            guestEnemy.healthBar.destroy();
+          }
+        },
+      });
+
+      this.guestEnemies.delete(message.id);
+    }
+
+    // Spawn death particles at the location
+    this.spawnDeathParticles(message.x, message.y);
+
+    // Add to kill feed
+    this.addKillFeedEntry(message.killerPlayerId, message.enemyType);
+
+    // Emit event for local UI
+    this.scene.events.emit('killFeedEntry', message.killerPlayerId, message.enemyType);
+  }
+
+  private spawnDeathParticles(x: number, y: number): void {
+    if (!this.scene || !this.scene.add) return;
+
+    // Create simple death effect with sprites
+    for (let i = 0; i < 6; i++) {
+      const angle = (i / 6) * Math.PI * 2;
+      const particle = this.scene.add.circle(x, y, 3, 0xff4444, 0.8);
+      particle.setDepth(50);
+
+      this.scene.tweens.add({
+        targets: particle,
+        x: x + Math.cos(angle) * 30,
+        y: y + Math.sin(angle) * 30,
+        alpha: 0,
+        scale: 0.3,
+        duration: 300,
+        onComplete: () => {
+          if (particle && particle.active) {
+            particle.destroy();
+          }
+        },
+      });
+    }
+  }
+
+  private handleLootSpawn(message: LootSpawnMessage): void {
+    if (!this.scene || !this.scene.add) return;
+
+    // Parse loot data
+    let lootInfo: { type: string; data: string };
+    try {
+      lootInfo = JSON.parse(message.itemData);
+    } catch {
+      mpLog.warn('Guest', 'Failed to parse loot data');
+      return;
+    }
+
+    // Create visual loot indicator for guest (simplified visual)
+    const lootGlow = this.scene.add.circle(message.x, message.y, 10, 0xffdd44, 0.6);
+    lootGlow.setDepth(4);
+
+    // Floating animation
+    this.scene.tweens.add({
+      targets: lootGlow,
+      y: message.y - 5,
+      duration: 500,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.easeInOut',
+    });
+
+    // Pulse animation
+    this.scene.tweens.add({
+      targets: lootGlow,
+      alpha: 0.9,
+      scale: 1.2,
+      duration: 600,
+      yoyo: true,
+      repeat: -1,
+      ease: 'Sine.easeInOut',
+    });
+
+    // Store loot reference with ID for potential sync
+    lootGlow.setData('lootId', message.id);
+    lootGlow.setData('lootType', lootInfo.type);
+  }
+
+  private addKillFeedEntry(killerPlayerId: string, enemyType: string): void {
+    const entry: KillFeedEntry = {
+      killerPlayerId,
+      enemyType,
+      timestamp: Date.now(),
+    };
+
+    this.killFeed.unshift(entry);
+
+    // Limit entries
+    if (this.killFeed.length > this.KILL_FEED_MAX_ENTRIES) {
+      this.killFeed.pop();
+    }
+
+    // Auto-remove old entries
+    setTimeout(() => {
+      const index = this.killFeed.indexOf(entry);
+      if (index !== -1) {
+        this.killFeed.splice(index, 1);
+      }
+    }, this.KILL_FEED_DURATION_MS);
+  }
+
+  getKillFeed(): KillFeedEntry[] {
+    return this.killFeed;
+  }
+
+  private handleLootTaken(message: LootTakenMessage): void {
+    if (!this.scene || !this.scene.add || !this.scene.cameras) return;
+
+    // Find and remove the loot glow indicator
+    // Note: In a full implementation, we'd track loot sprites by ID
+    // For now, just show a notification
+
+    const isHost = message.playerId === 'host';
+    const playerName = isHost ? 'Host' : 'You';
+    const color = isHost ? '#88ff88' : '#88aaff';
+
+    // Show pickup notification at top of screen
+    const cam = this.scene.cameras.main;
+    const text = this.scene.add.text(cam.width / 2, 100, `${playerName} picked up loot!`, {
+      fontSize: '12px',
+      fontFamily: 'Roboto Mono, monospace',
+      color: color,
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    text.setOrigin(0.5);
+    text.setScrollFactor(0);
+    text.setDepth(100);
+    text.setAlpha(0);
+
+    // Animate
+    this.scene.tweens.add({
+      targets: text,
+      alpha: 1,
+      y: 90,
+      duration: 200,
+      ease: 'Cubic.easeOut',
+      onComplete: () => {
+        this.scene.time.delayedCall(1500, () => {
+          this.scene.tweens.add({
+            targets: text,
+            alpha: 0,
+            y: 80,
+            duration: 300,
+            onComplete: () => {
+              if (text && text.active) text.destroy();
+            },
+          });
+        });
+      },
+    });
+  }
+
+  private handleDamageNumber(message: DamageNumberMessage): void {
+    if (!this.scene || !this.scene.add) return;
+
+    // Validate position
+    const x = typeof message.x === 'number' && !isNaN(message.x) ? message.x : 0;
+    const y = typeof message.y === 'number' && !isNaN(message.y) ? message.y : 0;
+    const damage = typeof message.damage === 'number' && !isNaN(message.damage) ? Math.floor(message.damage) : 0;
+
+    // Create damage number text
+    const color = message.isPlayerDamage ? '#ff4444' : '#ffff44';
+    const text = this.scene.add.text(x, y - 10, `${damage}`, {
+      fontSize: '14px',
+      fontFamily: 'Roboto Mono, monospace',
+      color: color,
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    text.setOrigin(0.5);
+    text.setDepth(100);
+
+    // Float up and fade out animation
+    this.scene.tweens.add({
+      targets: text,
+      y: y - 35,
+      alpha: 0,
+      duration: 800,
+      ease: 'Cubic.easeOut',
+      onComplete: () => {
+        if (text && text.active) {
+          text.destroy();
+        }
+      },
+    });
+  }
+
+  private handleComboUpdate(message: ComboUpdateMessage): void {
+    if (!this.scene || !this.scene.add) return;
+
+    // Validate message data
+    const count = typeof message.count === 'number' && message.count >= 2 ? message.count : 2;
+    const killer = typeof message.lastKiller === 'string' ? message.lastKiller : 'host';
+    const x = typeof message.x === 'number' && !isNaN(message.x) ? message.x : 0;
+    const y = typeof message.y === 'number' && !isNaN(message.y) ? message.y : 0;
+
+    // Color based on who got the kill - for guest, swap colors
+    // Guest sees their own kills as gold, host kills as green
+    const color = killer === 'guest' ? '#ffdd44' : '#88ff88';
+    const comboText = count >= 5 ? `${count}x MEGA COMBO!` : `${count}x COMBO!`;
+
+    const text = this.scene.add.text(x, y - 40, comboText, {
+      fontSize: count >= 5 ? '20px' : '16px',
+      fontFamily: 'Cinzel, Georgia, serif',
+      color: color,
+      stroke: '#000000',
+      strokeThickness: 3,
+    });
+    text.setOrigin(0.5);
+    text.setDepth(150);
+
+    // Animate: scale up, hold, fade out
+    text.setScale(0.5);
+    this.scene.tweens.add({
+      targets: text,
+      scale: 1.2,
+      duration: 150,
+      ease: 'Back.easeOut',
+      onComplete: () => {
+        this.scene.tweens.add({
+          targets: text,
+          scale: 1,
+          duration: 100,
+          onComplete: () => {
+            this.scene.time.delayedCall(500, () => {
+              this.scene.tweens.add({
+                targets: text,
+                y: y - 60,
+                alpha: 0,
+                duration: 400,
+                ease: 'Cubic.easeIn',
+                onComplete: () => {
+                  if (text && text.active) text.destroy();
+                },
+              });
+            });
+          },
+        });
+      },
+    });
+  }
+
+  private handlePingMarker(message: PingMarkerMessage): void {
+    if (!this.scene || !this.scene.add) return;
+
+    const x = typeof message.x === 'number' ? message.x : 0;
+    const y = typeof message.y === 'number' ? message.y : 0;
+    const pingType = message.pingType || 'alert';
+
+    this.showPingMarker(x, y, pingType, message.senderId);
+  }
+
+  showPingMarker(x: number, y: number, pingType: string, senderId: string): void {
+    if (!this.scene || !this.scene.add) return;
+
+    const colors: Record<string, number> = {
+      alert: 0xff4444,
+      move: 0x44ff44,
+      enemy: 0xffaa00,
+    };
+    const color = colors[pingType] || 0xffffff;
+    const senderColor = senderId === 'host' ? 0x88ff88 : 0x88aaff;
+
+    const container = this.scene.add.container(x, y);
+    container.setDepth(90);
+
+    // Ping ring
+    const ring = this.scene.add.circle(0, 0, 20, color, 0);
+    ring.setStrokeStyle(3, color);
+    container.add(ring);
+
+    // Center dot
+    const dot = this.scene.add.circle(0, 0, 5, senderColor);
+    container.add(dot);
+
+    // Icon based on type
+    const icons: Record<string, string> = {
+      alert: '!',
+      move: '→',
+      enemy: '⚔',
+    };
+    const icon = this.scene.add.text(0, -35, icons[pingType] || '?', {
+      fontSize: '16px',
+      color: `#${color.toString(16).padStart(6, '0')}`,
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    icon.setOrigin(0.5);
+    container.add(icon);
+
+    // Expand animation
+    this.scene.tweens.add({
+      targets: ring,
+      scale: 2,
+      alpha: 0,
+      duration: 1500,
+      repeat: 2,
+    });
+
+    // Remove after animation
+    this.scene.time.delayedCall(4500, () => {
+      if (container && container.active) container.destroy();
+    });
+  }
+
+  // Send ping from guest
+  sendPing(x: number, y: number, pingType: 'alert' | 'move' | 'enemy'): void {
+    const message: PingMarkerMessage = {
+      type: MessageType.PING_MARKER,
+      senderId: 'guest',
+      x,
+      y,
+      pingType,
+    };
+    networkManager.broadcast(message);
+
+    // Show locally too
+    this.showPingMarker(x, y, pingType, 'guest');
+  }
+
+  private handleEmote(message: EmoteMessage): void {
+    if (!this.hostPlayer || !this.scene || !this.scene.add) return;
+
+    const x = typeof message.x === 'number' ? message.x : this.hostPlayer.x;
+    const y = typeof message.y === 'number' ? message.y : this.hostPlayer.y;
+    const emoteType = message.emoteType || 'wave';
+
+    this.showEmoteBubble(x, y, emoteType, message.senderId);
+  }
+
+  // Send emote from guest
+  sendEmote(emoteType: EmoteMessage['emoteType']): void {
+    const message: EmoteMessage = {
+      type: MessageType.EMOTE,
+      senderId: 'guest',
+      emoteType,
+      x: this.player.x,
+      y: this.player.y,
+    };
+    networkManager.broadcast(message);
+
+    // Show locally too
+    this.showEmoteBubble(this.player.x, this.player.y, emoteType, 'guest');
+  }
+
+  private showEmoteBubble(x: number, y: number, emoteType: string, senderId: string): void {
+    if (!this.scene || !this.scene.add) return;
+
+    // Emote icons
+    const emoteIcons: Record<string, string> = {
+      wave: '👋',
+      thumbsUp: '👍',
+      help: '❗',
+      follow: '👉',
+      wait: '✋',
+      cheer: '🎉',
+    };
+
+    const icon = emoteIcons[emoteType] || '❓';
+    const senderColor = senderId === 'host' ? 0x88ff88 : 0x88aaff;
+
+    // Create bubble container
+    const container = this.scene.add.container(x, y - 50);
+    container.setDepth(120);
+
+    // Bubble background
+    const bubble = this.scene.add.circle(0, 0, 20, senderColor, 0.9);
+    bubble.setStrokeStyle(2, 0x000000);
+    container.add(bubble);
+
+    // Emote icon
+    const emoteText = this.scene.add.text(0, 0, icon, {
+      fontSize: '18px',
+    });
+    emoteText.setOrigin(0.5);
+    container.add(emoteText);
+
+    // Animate: float up and pop in/out
+    container.setScale(0);
+    this.scene.tweens.add({
+      targets: container,
+      scale: 1.2,
+      duration: 150,
+      ease: 'Back.easeOut',
+      onComplete: () => {
+        this.scene.tweens.add({
+          targets: container,
+          scale: 1,
+          duration: 100,
+          onComplete: () => {
+            // Hold for a moment
+            this.scene.time.delayedCall(1500, () => {
+              this.scene.tweens.add({
+                targets: container,
+                y: y - 80,
+                alpha: 0,
+                scale: 0.5,
+                duration: 400,
+                ease: 'Cubic.easeIn',
+                onComplete: () => {
+                  if (container && container.active) container.destroy();
+                },
+              });
+            });
+          },
+        });
+      },
+    });
+  }
+
+  private handleReviveProgress(message: ReviveProgressMessage): void {
+    if (message.targetPlayerId !== 'guest' || !this.isDowned) return;
+
+    const progress = typeof message.progress === 'number' ? message.progress : 0;
+
+    // Create or update progress UI
+    if (!this.reviveProgressUI) {
+      this.createReviveProgressUI();
+    }
+
+    this.updateReviveProgressUI(progress);
+  }
+
+  private createReviveProgressUI(): void {
+    if (!this.scene || !this.scene.add || this.reviveProgressUI) return;
+
+    const cam = this.scene.cameras.main;
+    this.reviveProgressUI = this.scene.add.container(cam.width / 2, cam.height / 2 + 50);
+    this.reviveProgressUI.setScrollFactor(0);
+    this.reviveProgressUI.setDepth(200);
+
+    // Background bar
+    const bg = this.scene.add.rectangle(0, 0, 100, 15, 0x333333);
+    bg.setStrokeStyle(2, 0x44ff44);
+    this.reviveProgressUI.add(bg);
+
+    // Progress bar
+    const fill = this.scene.add.rectangle(-48, 0, 0, 11, 0x44ff44);
+    fill.setOrigin(0, 0.5);
+    fill.setName('fill');
+    this.reviveProgressUI.add(fill);
+
+    // Text
+    const text = this.scene.add.text(0, -20, 'BEING REVIVED...', {
+      fontSize: '12px',
+      fontFamily: 'Roboto Mono',
+      color: '#44ff44',
+    });
+    text.setOrigin(0.5);
+    this.reviveProgressUI.add(text);
+  }
+
+  private updateReviveProgressUI(progress: number): void {
+    if (!this.reviveProgressUI) return;
+
+    const fill = this.reviveProgressUI.getByName('fill') as Phaser.GameObjects.Rectangle;
+    if (fill) {
+      fill.width = 96 * Math.min(1, progress);
+    }
+  }
+
+  private handleReviveComplete(message: ReviveCompleteMessage): void {
+    if (message.targetPlayerId !== 'guest') return;
+
+    // Exit downed state
+    this.isDowned = false;
+
+    // Destroy UI elements
+    if (this.reviveProgressUI) {
+      this.reviveProgressUI.destroy();
+      this.reviveProgressUI = null;
+    }
+    if (this.downedOverlay) {
+      this.downedOverlay.destroy();
+      this.downedOverlay = null;
+    }
+
+    // Restore player
+    const x = typeof message.x === 'number' ? message.x : this.player.x;
+    const y = typeof message.y === 'number' ? message.y : this.player.y;
+
+    this.player.setPosition(x, y);
+    this.player.hp = Math.floor(this.player.maxHp * 0.5); // Revive with 50% HP
+    this.player.setAlpha(1);
+    this.player.setActive(true);
+
+    // Show notification
+    this.showReviveNotification();
+  }
+
+  private showReviveNotification(): void {
+    if (!this.scene || !this.scene.add) return;
+
+    const cam = this.scene.cameras.main;
+    const text = this.scene.add.text(cam.width / 2, cam.height / 2, 'REVIVED!', {
+      fontSize: '24px',
+      fontFamily: 'Cinzel, Georgia, serif',
+      color: '#44ff44',
+      stroke: '#000000',
+      strokeThickness: 3,
+    });
+    text.setOrigin(0.5);
+    text.setScrollFactor(0);
+    text.setDepth(200);
+    text.setScale(0.5);
+
+    this.scene.tweens.add({
+      targets: text,
+      scale: 1,
+      duration: 200,
+      ease: 'Back.easeOut',
+      onComplete: () => {
+        this.scene.time.delayedCall(1000, () => {
+          this.scene.tweens.add({
+            targets: text,
+            alpha: 0,
+            y: cam.height / 2 - 30,
+            duration: 400,
+            onComplete: () => {
+              if (text && text.active) text.destroy();
+            },
+          });
+        });
+      },
+    });
+  }
+
+  // Called when guest player takes fatal damage
+  enterDownedState(): void {
+    if (this.isDowned) return;
+
+    this.isDowned = true;
+    this.player.setAlpha(0.5);
+    this.player.setActive(false);
+
+    // Broadcast downed state to host
+    const message: PlayerDownedMessage = {
+      type: MessageType.PLAYER_DOWNED,
+      playerId: 'guest',
+      x: this.player.x,
+      y: this.player.y,
+    };
+    networkManager.broadcast(message);
+
+    // Show downed overlay
+    this.showDownedOverlay();
+  }
+
+  private showDownedOverlay(): void {
+    if (!this.scene || !this.scene.add) return;
+
+    const cam = this.scene.cameras.main;
+    this.downedOverlay = this.scene.add.container(cam.width / 2, cam.height / 2);
+    this.downedOverlay.setScrollFactor(0);
+    this.downedOverlay.setDepth(150);
+
+    // Red vignette overlay
+    const vignette = this.scene.add.rectangle(0, 0, cam.width, cam.height, 0x440000, 0.4);
+    this.downedOverlay.add(vignette);
+
+    // Downed text
+    const text = this.scene.add.text(0, -30, 'YOU ARE DOWN!', {
+      fontSize: '24px',
+      fontFamily: 'Cinzel, Georgia, serif',
+      color: '#ff4444',
+      stroke: '#000000',
+      strokeThickness: 3,
+    });
+    text.setOrigin(0.5);
+    this.downedOverlay.add(text);
+
+    // Wait message
+    const subtext = this.scene.add.text(0, 10, 'Waiting for host to revive...', {
+      fontSize: '12px',
+      fontFamily: 'Roboto Mono',
+      color: '#ffffff',
+    });
+    subtext.setOrigin(0.5);
+    this.downedOverlay.add(subtext);
+
+    // Pulse animation on text
+    this.scene.tweens.add({
+      targets: text,
+      alpha: 0.6,
+      duration: 800,
+      yoyo: true,
+      repeat: -1,
+    });
+  }
+
+  getIsDowned(): boolean {
+    return this.isDowned;
+  }
+
+  private updateProximityBuff(): void {
+    if (!this.hostPlayer || this.isDowned) {
+      if (this.proximityBuffActive) {
+        this.deactivateProximityBuff();
+      }
+      return;
+    }
+
+    const dist = Phaser.Math.Distance.Between(
+      this.player.x,
+      this.player.y,
+      this.hostPlayer.x,
+      this.hostPlayer.y
+    );
+
+    const shouldBeActive = dist <= this.PROXIMITY_BUFF_DISTANCE;
+
+    if (shouldBeActive && !this.proximityBuffActive) {
+      this.activateProximityBuff();
+    } else if (!shouldBeActive && this.proximityBuffActive) {
+      this.deactivateProximityBuff();
+    }
+  }
+
+  private activateProximityBuff(): void {
+    this.proximityBuffActive = true;
+    this.createProximityBuffUI();
+  }
+
+  private deactivateProximityBuff(): void {
+    this.proximityBuffActive = false;
+    this.destroyProximityBuffUI();
+  }
+
+  private createProximityBuffUI(): void {
+    if (!this.scene || !this.scene.add || this.proximityBuffUI) return;
+
+    const cam = this.scene.cameras.main;
+    this.proximityBuffUI = this.scene.add.container(cam.width / 2, 30);
+    this.proximityBuffUI.setScrollFactor(0);
+    this.proximityBuffUI.setDepth(100);
+
+    // Background
+    const bg = this.scene.add.rectangle(0, 0, 120, 24, 0x000000, 0.6);
+    bg.setStrokeStyle(1, 0xffdd44);
+    this.proximityBuffUI.add(bg);
+
+    // Icon
+    const icon = this.scene.add.text(-50, 0, '⚡', {
+      fontSize: '14px',
+    });
+    icon.setOrigin(0.5);
+    this.proximityBuffUI.add(icon);
+
+    // Text
+    const text = this.scene.add.text(5, 0, 'CO-OP BOOST', {
+      fontSize: '10px',
+      fontFamily: 'Roboto Mono',
+      color: '#ffdd44',
+    });
+    text.setOrigin(0.5);
+    this.proximityBuffUI.add(text);
+
+    // Subtle pulse animation
+    this.scene.tweens.add({
+      targets: bg,
+      alpha: 0.4,
+      duration: 600,
+      yoyo: true,
+      repeat: -1,
+    });
+  }
+
+  private destroyProximityBuffUI(): void {
+    if (this.proximityBuffUI) {
+      this.proximityBuffUI.destroy();
+      this.proximityBuffUI = null;
+    }
+  }
+
+  getProximityBuffMultiplier(): number {
+    return this.proximityBuffActive ? this.PROXIMITY_BUFF_MULTIPLIER : 1.0;
+  }
+
+  isProximityBuffActive(): boolean {
+    return this.proximityBuffActive;
+  }
+
+  private reconnectOverlay: Phaser.GameObjects.Container | null = null;
+  private reconnectDotTimer: Phaser.Time.TimerEvent | null = null;
+
+  private onHostDisconnected(): void {
+    // Check if we're reconnecting or truly disconnected
+    const state = networkManager.connectionState;
+
+    if (state === 'reconnecting') {
+      this.showReconnectingUI();
+      return;
+    }
+
+    // If state is 'disconnected', show final disconnect message
+    this.showDisconnectedUI();
+  }
+
+  private showReconnectingUI(): void {
+    if (this.reconnectOverlay) return; // Already showing
+    if (!this.scene || !this.scene.cameras || !this.scene.cameras.main) return;
+
+    const width = this.scene.cameras.main.width;
+    const height = this.scene.cameras.main.height;
+
+    this.reconnectOverlay = this.scene.add.container(width / 2, height / 2);
+    this.reconnectOverlay.setDepth(1000);
+    this.reconnectOverlay.setScrollFactor(0);
+
+    const bg = this.scene.add.rectangle(0, 0, width, height, 0x000000, 0.7);
+
+    const text = this.scene.add.text(0, -20, 'Connection lost...', {
+      fontSize: '24px',
+      fontFamily: 'Cinzel',
+      color: '#ffaa00',
+    });
+    text.setOrigin(0.5);
+
+    const subtext = this.scene.add.text(0, 20, 'Attempting to reconnect', {
+      fontSize: '14px',
+      fontFamily: 'Roboto Mono',
+      color: '#888888',
+    });
+    subtext.setOrigin(0.5);
+
+    this.reconnectOverlay.add([bg, text, subtext]);
+
+    // Animate dots - store timer reference for cleanup
+    let dots = 0;
+    this.reconnectDotTimer = this.scene.time.addEvent({
+      delay: 500,
+      loop: true,
+      callback: () => {
+        dots = (dots + 1) % 4;
+        if (subtext && subtext.active) {
+          subtext.setText('Attempting to reconnect' + '.'.repeat(dots));
+        }
+      },
+    });
+
+    // Listen for connection state changes
+    networkManager.onConnectionStateChange((state) => {
+      if (state === 'connected') {
+        this.cleanupReconnectTimer();
+        this.hideReconnectUI();
+      } else if (state === 'disconnected') {
+        this.cleanupReconnectTimer();
+        this.hideReconnectUI();
+        this.showDisconnectedUI();
+      }
+    });
+  }
+
+  private cleanupReconnectTimer(): void {
+    if (this.reconnectDotTimer) {
+      this.reconnectDotTimer.destroy();
+      this.reconnectDotTimer = null;
+    }
+  }
+
+  private hideReconnectUI(): void {
+    if (this.reconnectOverlay) {
+      this.reconnectOverlay.destroy();
+      this.reconnectOverlay = null;
+    }
+  }
+
+  private showDisconnectedUI(): void {
+    this.hideReconnectUI();
+    if (!this.scene || !this.scene.cameras || !this.scene.cameras.main) return;
+
+    const width = this.scene.cameras.main.width;
+    const height = this.scene.cameras.main.height;
+
+    const overlay = this.scene.add.rectangle(
+      width / 2, height / 2, width, height, 0x000000, 0.9
+    );
+    overlay.setDepth(1000);
+    overlay.setScrollFactor(0);
+
+    const text = this.scene.add.text(width / 2, height / 2, 'Host disconnected', {
+      fontSize: '24px',
+      fontFamily: 'Cinzel',
+      color: '#ff4444',
+    });
+    text.setOrigin(0.5);
+    text.setDepth(1001);
+    text.setScrollFactor(0);
+
+    // Capture scene reference for delayed callback
+    const sceneRef = this.scene;
+    this.scene.time.delayedCall(2000, () => {
+      networkManager.disconnect();
+      if (sceneRef && sceneRef.scene) {
+        sceneRef.scene.start('MenuScene');
+      }
+    });
+  }
+
+  private enterSpectateMode(): void {
+    this.isSpectating = true;
+    this.player.setAlpha(0.3);
+    this.player.setActive(false);
+
+    if (!this.scene || !this.scene.cameras || !this.scene.cameras.main) return;
+    const width = this.scene.cameras.main.width;
+
+    this.spectateOverlay = this.scene.add.container(width / 2, 50);
+    this.spectateOverlay.setScrollFactor(0);
+    this.spectateOverlay.setDepth(100);
+
+    const bg = this.scene.add.rectangle(0, 0, 300, 40, 0x000000, 0.7);
+    const text = this.scene.add.text(0, 0, 'Waiting for room clear...', {
+      fontSize: '14px',
+      fontFamily: 'Roboto Mono',
+      color: '#ff8888',
+    });
+    text.setOrigin(0.5);
+
+    this.spectateOverlay.add([bg, text]);
+
+    // Follow host - use smooth follow for better camera movement
+    if (this.hostPlayer) {
+      this.scene.cameras.main.startFollow(this.hostPlayer, true, 0.1, 0.1);
+    }
+  }
+
+  private exitSpectateMode(): void {
+    this.isSpectating = false;
+    this.player.setAlpha(1);
+    this.player.setActive(true);
+    this.player.hp = this.player.maxHp;
+
+    if (this.spectateOverlay) {
+      this.spectateOverlay.destroy();
+      this.spectateOverlay = null;
+    }
+
+    // Return camera to player
+    if (this.scene && this.scene.cameras && this.scene.cameras.main) {
+      this.scene.cameras.main.startFollow(this.player);
+    }
+  }
+
+  update(): void {
+    if (!networkManager.isConnected) return;
+
+    this.hostPlayer?.update();
+
+    // Update last safe position when host moves
+    if (this.hostPlayer) {
+      this.lastSafeX = this.hostPlayer.x;
+      this.lastSafeY = this.hostPlayer.y;
+    }
+
+    // Room-based tethering: prevent guest from entering rooms host hasn't visited yet
+    if (this.roomManager && !this.isSpectating) {
+      const guestRoom = this.roomManager.getRoomAtPosition(this.player.x, this.player.y);
+
+      if (guestRoom) {
+        // Guest can only be in rooms that the host has visited
+        const isRoomSafe = this.visitedRoomIds.has(guestRoom.id);
+
+        if (!isRoomSafe) {
+          // Teleport back to last safe position (near host)
+          this.player.setPosition(this.lastSafeX + 20, this.lastSafeY);
+          this.player.setVelocity(0, 0);
+        }
+      }
+    }
+
+    // Smooth interpolation for all guest enemies
+    this.updateEnemyInterpolation();
+
+    // Proximity buff check
+    this.updateProximityBuff();
+
+    // Distance tether check
+    this.updateDistanceTether();
+  }
+
+  private updateDistanceTether(): void {
+    if (!this.hostPlayer) {
+      this.hideTetherWarning();
+      return;
+    }
+
+    const dist = Phaser.Math.Distance.Between(
+      this.player.x,
+      this.player.y,
+      this.hostPlayer.x,
+      this.hostPlayer.y
+    );
+
+    // Update tether line
+    this.updateTetherLine(dist);
+
+    if (dist >= this.TETHER_WARNING_DISTANCE && !this.isTooFar) {
+      this.isTooFar = true;
+      this.showTetherWarning();
+    } else if (dist < this.TETHER_WARNING_DISTANCE && this.isTooFar) {
+      this.isTooFar = false;
+      this.hideTetherWarning();
+    }
+  }
+
+  private updateTetherLine(dist: number): void {
+    if (!this.hostPlayer || !this.scene || !this.scene.add) return;
+
+    // Only show line when getting far
+    if (dist < this.TETHER_WARNING_DISTANCE * 0.8) {
+      if (this.tetherLine) {
+        this.tetherLine.destroy();
+        this.tetherLine = null;
+      }
+      return;
+    }
+
+    if (!this.tetherLine) {
+      this.tetherLine = this.scene.add.graphics();
+      this.tetherLine.setDepth(5);
+    }
+
+    this.tetherLine.clear();
+
+    const warningRatio = Math.min(1, (dist - this.TETHER_WARNING_DISTANCE * 0.8) /
+      (this.TETHER_WARNING_DISTANCE * 0.6));
+    const alpha = 0.2 + warningRatio * 0.4;
+    const color = warningRatio < 0.5 ? 0xffaa00 : 0xff4444;
+
+    this.tetherLine.lineStyle(2, color, alpha);
+    this.tetherLine.beginPath();
+    this.tetherLine.moveTo(this.player.x, this.player.y);
+    this.tetherLine.lineTo(this.hostPlayer.x, this.hostPlayer.y);
+    this.tetherLine.strokePath();
+  }
+
+  private showTetherWarning(): void {
+    if (this.tetherWarningUI || !this.scene || !this.scene.add || !this.scene.cameras) return;
+
+    const cam = this.scene.cameras.main;
+    this.tetherWarningUI = this.scene.add.container(cam.width / 2, 60);
+    this.tetherWarningUI.setScrollFactor(0);
+    this.tetherWarningUI.setDepth(100);
+
+    const bg = this.scene.add.rectangle(0, 0, 200, 30, 0x000000, 0.7);
+    bg.setStrokeStyle(1, 0xff4444);
+    this.tetherWarningUI.add(bg);
+
+    const text = this.scene.add.text(0, 0, '⚠ TOO FAR FROM HOST!', {
+      fontSize: '11px',
+      fontFamily: 'Roboto Mono',
+      color: '#ff4444',
+    });
+    text.setOrigin(0.5);
+    this.tetherWarningUI.add(text);
+
+    this.scene.tweens.add({
+      targets: bg,
+      alpha: 0.4,
+      duration: 500,
+      yoyo: true,
+      repeat: -1,
+    });
+  }
+
+  private hideTetherWarning(): void {
+    if (this.tetherWarningUI) {
+      this.tetherWarningUI.destroy();
+      this.tetherWarningUI = null;
+    }
+    if (this.tetherLine) {
+      this.tetherLine.destroy();
+      this.tetherLine = null;
+    }
+  }
+
+  private handleXpGained(message: XpGainedMessage): void {
+    if (!this.scene || !this.scene.add) return;
+
+    const x = typeof message.x === 'number' ? message.x : 0;
+    const y = typeof message.y === 'number' ? message.y : 0;
+    const amount = typeof message.amount === 'number' ? message.amount : 0;
+
+    // Show XP notification
+    const text = this.scene.add.text(x, y - 20, `+${amount} XP`, {
+      fontSize: '12px',
+      fontFamily: 'Roboto Mono',
+      color: '#aaddff',
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    text.setOrigin(0.5);
+    text.setDepth(100);
+
+    this.scene.tweens.add({
+      targets: text,
+      y: y - 50,
+      alpha: 0,
+      duration: 1000,
+      ease: 'Cubic.easeOut',
+      onComplete: () => {
+        if (text && text.active) text.destroy();
+      },
+    });
+  }
+
+  private handleLevelUp(message: LevelUpMessage): void {
+    if (!this.scene || !this.scene.add) return;
+
+    const level = typeof message.newLevel === 'number' ? message.newLevel : 1;
+    const x = typeof message.x === 'number' ? message.x : 0;
+    const y = typeof message.y === 'number' ? message.y : 0;
+
+    this.showLevelUpNotification(message.playerId, level, x, y);
+  }
+
+  // Broadcast guest level-up to host
+  broadcastLevelUp(newLevel: number): void {
+    const message: LevelUpMessage = {
+      type: MessageType.LEVEL_UP,
+      playerId: 'guest',
+      newLevel,
+      x: this.player.x,
+      y: this.player.y,
+    };
+    networkManager.broadcast(message);
+
+    // Show local level-up notification
+    this.showLevelUpNotification('guest', newLevel, this.player.x, this.player.y);
+  }
+
+  private handleHealthPickup(message: HealthPickupMessage): void {
+    if (!this.scene || !this.scene.add) return;
+
+    const x = typeof message.x === 'number' ? message.x : 0;
+    const y = typeof message.y === 'number' ? message.y : 0;
+    const amount = typeof message.amount === 'number' ? message.amount : 0;
+
+    this.showHealthPickupNotification(x, y, amount, message.playerId);
+  }
+
+  // Broadcast guest health pickup to host
+  broadcastHealthPickup(amount: number): void {
+    const message: HealthPickupMessage = {
+      type: MessageType.HEALTH_PICKUP,
+      playerId: 'guest',
+      amount,
+      newHp: this.player.hp,
+      maxHp: this.player.maxHp,
+      x: this.player.x,
+      y: this.player.y,
+    };
+    networkManager.broadcast(message);
+  }
+
+  private handleDuoKill(message: DuoKillMessage): void {
+    if (!this.scene || !this.scene.add) return;
+
+    const x = typeof message.x === 'number' ? message.x : 0;
+    const y = typeof message.y === 'number' ? message.y : 0;
+
+    this.showDuoKillNotification(x, y);
+  }
+
+  private showDuoKillNotification(x: number, y: number): void {
+    if (!this.scene || !this.scene.add) return;
+
+    // Create visual effect (same as host)
+    const container = this.scene.add.container(x, y - 50);
+    container.setDepth(160);
+
+    // Gradient background circle
+    const glow = this.scene.add.circle(0, 0, 40, 0xffdd44, 0.4);
+    container.add(glow);
+
+    // Main text
+    const text = this.scene.add.text(0, 0, 'DUO KILL!', {
+      fontSize: '18px',
+      fontFamily: 'Cinzel, Georgia, serif',
+      color: '#ffdd44',
+      stroke: '#000000',
+      strokeThickness: 3,
+    });
+    text.setOrigin(0.5);
+    container.add(text);
+
+    // Player icons
+    const hostIcon = this.scene.add.text(-35, 20, '⚔', { fontSize: '14px' });
+    hostIcon.setOrigin(0.5);
+    hostIcon.setTint(0x88ff88); // Green for host in guest view
+    container.add(hostIcon);
+
+    const guestIcon = this.scene.add.text(35, 20, '⚔', { fontSize: '14px' });
+    guestIcon.setOrigin(0.5);
+    container.add(guestIcon);
+
+    // Animate
+    container.setScale(0);
+    this.scene.tweens.add({
+      targets: container,
+      scale: 1.3,
+      duration: 200,
+      ease: 'Back.easeOut',
+      onComplete: () => {
+        this.scene.tweens.add({
+          targets: container,
+          scale: 1,
+          duration: 150,
+        });
+        // Glow pulse
+        this.scene.tweens.add({
+          targets: glow,
+          scale: 2,
+          alpha: 0,
+          duration: 500,
+        });
+      },
+    });
+
+    // Fade out
+    this.scene.time.delayedCall(1500, () => {
+      this.scene.tweens.add({
+        targets: container,
+        y: y - 90,
+        alpha: 0,
+        duration: 500,
+        ease: 'Cubic.easeIn',
+        onComplete: () => {
+          if (container && container.active) container.destroy();
+        },
+      });
+    });
+  }
+
+  private showHealthPickupNotification(x: number, y: number, amount: number, playerId: string): void {
+    if (!this.scene || !this.scene.add) return;
+
+    const isHost = playerId === 'host';
+    // For guest view: host is green, guest is gold
+    const color = isHost ? '#88ff88' : '#ffdd44';
+
+    // Healing number
+    const text = this.scene.add.text(x, y - 25, `+${amount}`, {
+      fontSize: '14px',
+      fontFamily: 'Roboto Mono',
+      color: color,
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    text.setOrigin(0.5);
+    text.setDepth(100);
+
+    // Heart icon
+    const heart = this.scene.add.text(x + 18, y - 25, '❤', {
+      fontSize: '12px',
+    });
+    heart.setOrigin(0.5);
+    heart.setDepth(100);
+
+    // Animate: float up and fade out
+    this.scene.tweens.add({
+      targets: [text, heart],
+      y: y - 55,
+      alpha: 0,
+      duration: 1000,
+      ease: 'Cubic.easeOut',
+      onComplete: () => {
+        if (text && text.active) text.destroy();
+        if (heart && heart.active) heart.destroy();
+      },
+    });
+  }
+
+  private showLevelUpNotification(playerId: string, level: number, x: number, y: number): void {
+    if (!this.scene || !this.scene.add) return;
+
+    const isHost = playerId === 'host';
+    // For guest, host is green, guest is blue
+    const color = isHost ? '#88ff88' : '#ffdd44';
+    const label = isHost ? 'HOST' : 'YOU';
+
+    // Create container for level-up effect
+    const container = this.scene.add.container(x, y - 60);
+    container.setDepth(150);
+
+    // Glow ring
+    const ring = this.scene.add.circle(0, 0, 40, isHost ? 0x88ff88 : 0xffdd44, 0.3);
+    container.add(ring);
+
+    // Level text
+    const levelText = this.scene.add.text(0, 0, `LEVEL ${level}!`, {
+      fontSize: '18px',
+      fontFamily: 'Cinzel, Georgia, serif',
+      color: color,
+      stroke: '#000000',
+      strokeThickness: 3,
+    });
+    levelText.setOrigin(0.5);
+    container.add(levelText);
+
+    // Player label
+    const labelText = this.scene.add.text(0, -25, label, {
+      fontSize: '10px',
+      fontFamily: 'Roboto Mono',
+      color: color,
+      stroke: '#000000',
+      strokeThickness: 2,
+    });
+    labelText.setOrigin(0.5);
+    container.add(labelText);
+
+    // Animate: expand ring, pop text, then fade
+    container.setScale(0);
+    this.scene.tweens.add({
+      targets: container,
+      scale: 1.3,
+      duration: 200,
+      ease: 'Back.easeOut',
+      onComplete: () => {
+        this.scene.tweens.add({
+          targets: container,
+          scale: 1,
+          duration: 100,
+        });
+        // Expand ring
+        this.scene.tweens.add({
+          targets: ring,
+          scale: 2,
+          alpha: 0,
+          duration: 600,
+        });
+      },
+    });
+
+    // Fade out after holding
+    this.scene.time.delayedCall(2000, () => {
+      this.scene.tweens.add({
+        targets: container,
+        y: y - 100,
+        alpha: 0,
+        duration: 500,
+        ease: 'Cubic.easeIn',
+        onComplete: () => {
+          if (container && container.active) container.destroy();
+        },
+      });
+    });
+  }
+
+  private updateEnemyInterpolation(): void {
+    const now = Date.now();
+    const expectedUpdateInterval = 50; // Host sends updates every 50ms
+
+    for (const guestEnemy of this.guestEnemies.values()) {
+      if (!guestEnemy.sprite || !guestEnemy.sprite.active) continue;
+
+      // Calculate time-based interpolation factor
+      const timeSinceUpdate = now - guestEnemy.lastUpdateTime;
+      // Use aggressive lerp to catch up, but cap it to prevent overshooting
+      const lerpFactor = Math.min(timeSinceUpdate / expectedUpdateInterval * 0.15, 0.4);
+
+      // Smooth interpolation toward target
+      guestEnemy.sprite.x = Phaser.Math.Linear(
+        guestEnemy.sprite.x,
+        guestEnemy.targetX,
+        lerpFactor
+      );
+      guestEnemy.sprite.y = Phaser.Math.Linear(
+        guestEnemy.sprite.y,
+        guestEnemy.targetY,
+        lerpFactor
+      );
+
+      // Update health bar position
+      this.updateHealthBar(guestEnemy);
+    }
+  }
+
+  getGuestEnemy(id: string): GuestEnemy | undefined {
+    return this.guestEnemies.get(id);
+  }
+
+  getHostPlayer(): RemotePlayer | null {
+    return this.hostPlayer;
+  }
+
+  cleanup(): void {
+    if (this.hostPlayer) {
+      this.hostPlayer.destroy();
+      this.hostPlayer = null;
+    }
+
+    for (const guestEnemy of this.guestEnemies.values()) {
+      guestEnemy.sprite.destroy();
+      guestEnemy.healthBar.destroy();
+    }
+    this.guestEnemies.clear();
+
+    if (this.spectateOverlay) {
+      this.spectateOverlay.destroy();
+      this.spectateOverlay = null;
+    }
+
+    if (this.reconnectOverlay) {
+      this.reconnectOverlay.destroy();
+      this.reconnectOverlay = null;
+    }
+
+    this.cleanupReconnectTimer();
+  }
+
+  destroy(): void {
+    // Clean up message listener to prevent memory leaks
+    if (this.messageListenerId) {
+      networkManager.offMessage(this.messageListenerId);
+      this.messageListenerId = null;
+    }
+
+    // Clean up connection state callback to prevent ghost callbacks
+    networkManager.offConnectionStateChange();
+
+    // Clean up peer leave callback
+    networkManager.clearOnPeerLeave();
+
+    // Clean up reconnect timer
+    this.cleanupReconnectTimer();
+
+    this.cleanup();
+  }
+}
