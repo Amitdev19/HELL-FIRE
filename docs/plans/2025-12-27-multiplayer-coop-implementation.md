@@ -1,5 +1,7 @@
 # Multiplayer Co-op Implementation Plan
 
+> **SUPERSEDED:** This plan describes the old Trystero/WebRTC P2P approach, which no longer exists. The current implementation uses a self-hosted WebSocket relay — see `docs/MULTIPLAYER_PROTOCOL.md`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Add browser-to-browser co-op multiplayer using Trystero P2P, where one player hosts and another joins as a helper.

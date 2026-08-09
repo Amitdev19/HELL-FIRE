@@ -483,5 +483,10 @@ export class PlayerAttackManager {
       };
       networkManager.broadcast(damageNumMessage);
     }
+
+    // The host must record itself as a hitter for kill attribution.
+    if (networkManager.isMultiplayer && networkManager.isHost) {
+      this.scene.events.emit('hostPlayerHit', enemy);
+    }
   }
 }

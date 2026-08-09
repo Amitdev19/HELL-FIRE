@@ -35,7 +35,7 @@ export class SettingsUI {
   private controlGuideOverlay: Phaser.GameObjects.Rectangle | null = null;
 
   private readonly PANEL_WIDTH = 400;
-  private readonly PANEL_HEIGHT = 620;
+  private readonly PANEL_HEIGHT = 600;
 
   constructor(scene: Phaser.Scene, audioSystem?: AudioSystem) {
     this.scene = scene;
@@ -134,6 +134,11 @@ export class SettingsUI {
     });
   }
 
+  /**
+   * Builds the panel using a sequential vertical cursor (`y`). Each section
+   * draws at the current cursor and returns the next cursor position, so
+   * sections can never overlap regardless of how many are added.
+   */
   private createPanel(): void {
     if (!this.panel) return;
 
@@ -149,12 +154,14 @@ export class SettingsUI {
 
     this.drawCornerAccents(halfW, halfH);
     this.createHeader(halfW, halfH);
-    this.createVolumeSection(halfW, halfH);
-    this.createControlsSection(halfW, halfH);
-    this.createControlModeSection(halfW, halfH);
-    this.createServerSection(halfW, halfH);
-    this.createControlGuideButton(halfH);
-    this.createResetButton(halfH);
+
+    let y = -halfH + 80;
+    y = this.createVolumeSection(halfW, y);
+    y = this.createControlsSection(halfW, y);
+    y = this.createControlModeSection(halfW, y);
+    y = this.createServerSection(halfW, y);
+    y = this.createControlGuideButton(y);
+    y = this.createResetButton(y);
   }
 
   private drawCornerAccents(halfW: number, halfH: number): void {
@@ -227,12 +234,10 @@ export class SettingsUI {
     this.panel.add(closeBtn);
   }
 
-  private createVolumeSection(halfW: number, halfH: number): void {
-    if (!this.panel) return;
+  private createVolumeSection(halfW: number, y: number): number {
+    if (!this.panel) return y;
 
-    const sectionY = -halfH + 75;
-
-    const label = this.scene.add.text(-halfW + 25, sectionY, 'VOLUME', {
+    const label = this.scene.add.text(-halfW + 25, y, 'VOLUME', {
       fontSize: '12px',
       fontFamily: 'Cinzel, Georgia, serif',
       color: '#888888',
@@ -242,12 +247,12 @@ export class SettingsUI {
 
     const divider = this.scene.add.graphics();
     divider.lineStyle(1, 0x333333, 0.8);
-    divider.lineBetween(-halfW + 80, sectionY, halfW - 25, sectionY);
+    divider.lineBetween(-halfW + 80, y, halfW - 25, y);
     this.panel.add(divider);
 
     this.sliders.master = this.createSlider(
       'Master',
-      sectionY + 35,
+      y + 35,
       halfW,
       () => this.audioSystem?.getMasterVolume() ?? SettingsManager.getMasterVolume(),
       (value: number) => this.audioSystem?.setMasterVolume(value)
@@ -255,7 +260,7 @@ export class SettingsUI {
 
     this.sliders.music = this.createSlider(
       'Music',
-      sectionY + 70,
+      y + 70,
       halfW,
       () => this.audioSystem?.getMusicVolume() ?? SettingsManager.getMusicVolume(),
       (value: number) => this.audioSystem?.setMusicVolume(value)
@@ -263,7 +268,7 @@ export class SettingsUI {
 
     this.sliders.sfx = this.createSlider(
       'SFX',
-      sectionY + 105,
+      y + 105,
       halfW,
       () => this.audioSystem?.getSFXVolume() ?? SettingsManager.getSFXVolume(),
       (value: number) => {
@@ -271,6 +276,8 @@ export class SettingsUI {
         this.audioSystem?.play('sfx_pickup', 0.5);
       }
     );
+
+    return y + 125;
   }
 
   private readonly SLIDER_WIDTH = 120;
@@ -354,12 +361,10 @@ export class SettingsUI {
     return sliderData;
   }
 
-  private createControlsSection(halfW: number, halfH: number): void {
-    if (!this.panel) return;
+  private createControlsSection(halfW: number, y: number): number {
+    if (!this.panel) return y;
 
-    const sectionY = -halfH + 210;
-
-    const label = this.scene.add.text(-halfW + 25, sectionY, 'CONTROLS', {
+    const label = this.scene.add.text(-halfW + 25, y, 'CONTROLS', {
       fontSize: '12px',
       fontFamily: 'Cinzel, Georgia, serif',
       color: '#888888',
@@ -369,7 +374,7 @@ export class SettingsUI {
 
     const divider = this.scene.add.graphics();
     divider.lineStyle(1, 0x333333, 0.8);
-    divider.lineBetween(-halfW + 100, sectionY, halfW - 25, sectionY);
+    divider.lineBetween(-halfW + 100, y, halfW - 25, y);
     this.panel.add(divider);
 
     const controls = [
@@ -381,14 +386,14 @@ export class SettingsUI {
       ['ESC', 'Settings'],
     ];
 
-    const startY = sectionY + 25;
+    const startY = y + 25;
     const rowHeight = 22;
 
     for (let i = 0; i < controls.length; i++) {
       const [key, action] = controls[i];
-      const y = startY + i * rowHeight;
+      const rowY = startY + i * rowHeight;
 
-      const keyText = this.scene.add.text(-halfW + 30, y, key, {
+      const keyText = this.scene.add.text(-halfW + 30, rowY, key, {
         fontSize: '11px',
         fontFamily: 'Roboto Mono, Courier New, monospace',
         color: '#cccccc',
@@ -396,7 +401,7 @@ export class SettingsUI {
       keyText.setOrigin(0, 0.5);
       this.panel.add(keyText);
 
-      const actionText = this.scene.add.text(halfW - 30, y, action, {
+      const actionText = this.scene.add.text(halfW - 30, rowY, action, {
         fontSize: '11px',
         fontFamily: 'Roboto Mono, Courier New, monospace',
         color: '#888888',
@@ -404,14 +409,14 @@ export class SettingsUI {
       actionText.setOrigin(1, 0.5);
       this.panel.add(actionText);
     }
+
+    return y + 150;
   }
 
-  private createControlModeSection(halfW: number, halfH: number): void {
-    if (!this.panel) return;
+  private createControlModeSection(halfW: number, y: number): number {
+    if (!this.panel) return y;
 
-    const sectionY = -halfH + 345;
-
-    const label = this.scene.add.text(-halfW + 25, sectionY, 'CONTROL MODE', {
+    const label = this.scene.add.text(-halfW + 25, y, 'CONTROL MODE', {
       fontSize: '12px',
       fontFamily: 'Cinzel, Georgia, serif',
       color: '#888888',
@@ -421,16 +426,16 @@ export class SettingsUI {
 
     const divider = this.scene.add.graphics();
     divider.lineStyle(1, 0x333333, 0.8);
-    divider.lineBetween(-halfW + 120, sectionY, halfW - 25, sectionY);
+    divider.lineBetween(-halfW + 120, y, halfW - 25, y);
     this.panel.add(divider);
 
     const btnW = 140;
     const btnH = 36;
     const gap = 20;
     const startX = -btnW / 2 - gap / 2;
-    const btnY = sectionY + 30;
+    const btnY = y + 30;
 
-    const makeToggleBtn = (x: number, label: string, mode: 'pc' | 'mobile'): Phaser.GameObjects.Container => {
+    const makeToggleBtn = (x: number, text: string, mode: 'pc' | 'mobile'): Phaser.GameObjects.Container => {
       const container = this.scene.add.container(x, btnY);
 
       const bg = this.scene.add.graphics();
@@ -441,13 +446,13 @@ export class SettingsUI {
       bg.strokeRoundedRect(-btnW / 2, -btnH / 2, btnW, btnH, 4);
       container.add(bg);
 
-      const text = this.scene.add.text(0, 0, label, {
+      const txt = this.scene.add.text(0, 0, text, {
         fontSize: '13px',
         fontFamily: 'Cinzel, Georgia, serif',
         color: isActive ? '#ffffff' : '#888888',
       });
-      text.setOrigin(0.5, 0.5);
-      container.add(text);
+      txt.setOrigin(0.5, 0.5);
+      container.add(txt);
 
       const hitArea = this.scene.add.rectangle(0, 0, btnW, btnH, 0xffffff, 0);
       hitArea.setInteractive({ useHandCursor: true });
@@ -481,13 +486,14 @@ export class SettingsUI {
 
     this.panel.add(pcBtn);
     this.panel.add(mobileBtn);
+
+    return y + 45;
   }
 
-  private createServerSection(halfW: number, halfH: number): void {
-    if (!this.panel) return;
+  private createServerSection(halfW: number, y: number): number {
+    if (!this.panel) return y;
 
-    const sectionY = -halfH + 420;
-    const label = this.scene.add.text(-halfW + 25, sectionY, 'CO-OP SERVER', {
+    const label = this.scene.add.text(-halfW + 25, y, 'CO-OP SERVER', {
       fontSize: '12px',
       fontFamily: 'Cinzel, Georgia, serif',
       color: '#888888',
@@ -497,12 +503,12 @@ export class SettingsUI {
 
     const divider = this.scene.add.graphics();
     divider.lineStyle(1, 0x333333, 0.8);
-    divider.lineBetween(-halfW + 120, sectionY, halfW - 25, sectionY);
+    divider.lineBetween(-halfW + 120, y, halfW - 25, y);
     this.panel.add(divider);
 
     const currentUrl = SettingsManager.getServerUrl();
-    const inputY = sectionY + 28;
-    const inputW = halfW * 2 - 50;
+    const inputY = y + 28;
+    const inputW = this.PANEL_WIDTH - 50;
     const inputH = 32;
 
     const inputBg = this.scene.add.rectangle(0, inputY, inputW, inputH, 0x1a1a1a, 0.9);
@@ -546,7 +552,7 @@ export class SettingsUI {
     const gap = 16;
     const startX = -btnW - gap / 2;
 
-    const makePresetBtn = (x: number, label: string, url: string): Phaser.GameObjects.Container => {
+    const makePresetBtn = (x: number, text: string, url: string): Phaser.GameObjects.Container => {
       const container = this.scene.add.container(x, btnY);
       const bg = this.scene.add.graphics();
       bg.fillStyle(0x1a1a2e, 0.9);
@@ -555,13 +561,13 @@ export class SettingsUI {
       bg.strokeRoundedRect(-btnW / 2, -btnH / 2, btnW, btnH, 4);
       container.add(bg);
 
-      const text = this.scene.add.text(0, 0, label, {
+      const txt = this.scene.add.text(0, 0, text, {
         fontSize: '10px',
         fontFamily: 'Roboto Mono, Courier New, monospace',
         color: '#ffcc00',
       });
-      text.setOrigin(0.5, 0.5);
-      container.add(text);
+      txt.setOrigin(0.5, 0.5);
+      container.add(txt);
 
       const hit = this.scene.add.rectangle(0, 0, btnW, btnH, 0xffffff, 0);
       hit.setInteractive({ useHandCursor: true });
@@ -592,13 +598,13 @@ export class SettingsUI {
       bg.strokeRoundedRect(-btnW / 2, -btnH / 2, btnW, btnH, 4);
       privateBtn.add(bg);
 
-      const text = this.scene.add.text(0, 0, 'PRIVATE', {
+      const txt = this.scene.add.text(0, 0, 'PRIVATE', {
         fontSize: '10px',
         fontFamily: 'Roboto Mono, Courier New, monospace',
         color: '#ffcc00',
       });
-      text.setOrigin(0.5, 0.5);
-      privateBtn.add(text);
+      txt.setOrigin(0.5, 0.5);
+      privateBtn.add(txt);
 
       const hit = this.scene.add.rectangle(0, 0, btnW, btnH, 0xffffff, 0);
       hit.setInteractive({ useHandCursor: true });
@@ -619,14 +625,15 @@ export class SettingsUI {
     this.panel.add(localBtn);
     this.panel.add(publicBtn);
     this.panel.add(privateBtn);
+
+    return y + 80;
   }
 
-  private createControlGuideButton(halfH: number): void {
-    if (!this.panel) return;
+  private createControlGuideButton(y: number): number {
+    if (!this.panel) return y;
 
     const btnWidth = 200;
     const btnHeight = 34;
-    const y = -halfH + 430;
 
     const container = this.scene.add.container(0, y);
 
@@ -665,6 +672,8 @@ export class SettingsUI {
     container.add(hitArea);
 
     this.panel.add(container);
+
+    return y + 25;
   }
 
   private showControlGuide(): void {
@@ -830,12 +839,11 @@ export class SettingsUI {
     });
   }
 
-  private createResetButton(halfH: number): void {
-    if (!this.panel) return;
+  private createResetButton(y: number): number {
+    if (!this.panel) return y;
 
     const btnWidth = 120;
     const btnHeight = 32;
-    const y = -halfH + 480;
 
     const container = this.scene.add.container(0, y);
 
@@ -891,6 +899,8 @@ export class SettingsUI {
     container.add(hitArea);
 
     this.panel.add(container);
+
+    return y + 25;
   }
 
   private setupInput(): void {

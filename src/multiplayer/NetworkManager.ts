@@ -70,7 +70,6 @@ export class NetworkManager {
   private reconnectAttempts: number = 0;
   private readonly MAX_RECONNECT_ATTEMPTS = 5;
   private readonly RECONNECT_DELAY_MS = 2000;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   private constructor() {}
 
@@ -406,11 +405,6 @@ export class NetworkManager {
   disconnect(): void {
     mpLog.onDisconnect();
     this.intentionalDisconnect = true;
-
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
 
     if (this.ws) {
       try {

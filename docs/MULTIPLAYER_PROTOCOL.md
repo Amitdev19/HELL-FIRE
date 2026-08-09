@@ -2,47 +2,55 @@
 
 > Comprehensive technical documentation for the HELL FIRE cooperative multiplayer system.
 
+> **Architecture note:** This document describes the **current self-hosted WebSocket relay** model. Older plans that reference Trystero/WebRTC P2P are obsolete (see `docs/plans/2025-12-27-multiplayer-coop-implementation.md`, which is superseded by this document).
+
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
 2. [Connection Flow](#connection-flow)
-3. [Message Types Reference](#message-types-reference)
-4. [State Synchronization](#state-synchronization)
-5. [Host Responsibilities](#host-responsibilities)
-6. [Guest Responsibilities](#guest-responsibilities)
-7. [Anti-Cheat Validation](#anti-cheat-validation)
-8. [Sequence Diagrams](#sequence-diagrams)
+3. [Server URL Selection](#server-url-selection)
+4. [Message Types Reference](#message-types-reference)
+5. [State Synchronization](#state-synchronization)
+6. [Host Responsibilities](#host-responsibilities)
+7. [Guest Responsibilities](#guest-responsibilities)
+8. [Anti-Cheat Validation](#anti-cheat-validation)
+9. [Sequence Diagrams](#sequence-diagrams)
 
 ---
 
 ## Architecture Overview
 
-### Trystero/WebRTC P2P
+### Self-hosted WebSocket Relay
 
-The multiplayer system uses **Trystero** as the networking layer, which provides WebRTC-based peer-to-peer communication. This enables direct player-to-player connections without routing traffic through game servers.
+The multiplayer system uses our **own self-hosted WebSocket relay** (`server/index.ts`). There is **no peer-to-peer (P2P) layer, no WebRTC, and no third-party signaling service**. The browser game is a plain WebSocket client (`src/multiplayer/NetworkManager.ts`) that connects to the relay and exchanges JSON envelopes.
 
 ```
-┌─────────────────┐                    ┌─────────────────┐
-│                 │    WebRTC P2P      │                 │
-│   Host Client   │◄──────────────────►│   Guest Client  │
-│   (Authority)   │   Direct Connect   │    (Helper)     │
-│                 │                    │                 │
-└─────────────────┘                    └─────────────────┘
+┌─────────────────┐                    ┌──────────────────────┐      ┌─────────────────┐
+│                 │   WebSocket (ws)   │                      │      │                 │
+│   Host Client   │◄──────────────────►│   Relay Server       │◄────►│   Guest Client  │
+│   (Authority)   │   same origin or   │   (server/index.ts)  │      │    (Helper)     │
+│                 │   configured URL   │   relays opaque data │      │                 │
+└─────────────────┘                    └──────────────────────┘      └─────────────────┘
 ```
 
-**Key Technologies:**
-- **Trystero**: WebRTC signaling and connection management
-- **WebRTC DataChannels**: Low-latency message passing
-- **Application ID**: `hell-fire-coop`
+**Key facts (from `server/index.ts`):**
+- A single Node process **serves the built game from `/dist` over HTTP** *and* runs the **authoritative WebSocket relay on the SAME port** (default `3001`, overridable via `PORT`).
+- The relay runs **no game logic**. It only:
+  - Lets a host open a room with a 6-character code.
+  - Lets a guest join that room by code.
+  - Relays opaque game messages between the two peers.
+  - Notifies peers when someone joins / leaves.
+- HTTP endpoints:
+  - `GET /health` → `{ ok: true, rooms, clients }`
+  - `GET /api/rooms` → `{ rooms: [{ code, players, full }] }`
+  - `WS <connect>` → the relay socket (transport for all co-op traffic).
 
-### No Central Server
+### No P2P / No Trystero
 
-Unlike traditional client-server architectures:
-
-- **No dedicated game server** - Reduces infrastructure costs and latency
-- **No relay servers for gameplay** - All game traffic is peer-to-peer
-- **Signaling only** - Trystero handles initial WebRTC handshake via public signaling servers
-- **Self-contained sessions** - Each game session is independent
+Unlike a P2P design:
+- **No dedicated game server logic** — the relay only forwards messages; the host client remains authoritative for game state.
+- **No signaling servers** — connections are plain WebSocket connections to a single relay URL.
+- **No WebRTC / DataChannels / `appId`** — all transport is `WebSocket` JSON envelopes.
 
 ### Host Authority Model
 
@@ -60,21 +68,48 @@ The game uses a **host-authoritative** model where one player (the host) is the 
 
 ## Connection Flow
 
-### Room Creation with Code
+### Room Codes
+
+- 6 characters from charset: `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`
+- Excludes ambiguous characters (`0`, `O`, `I`, `1`, `L`).
+- The server validates with `/^[A-HJ-NP-Z2-9]{6}$/`.
+- Example: `X7K3NP`
+- Both clients derive the **identical dungeon seed** from the room code (see [Dungeon Seeding](#dungeon-seeding)).
+
+### WebSocket Message Envelope
+
+All traffic between client and relay is a JSON object with a `t` ("type") field. The envelope types are:
+
+| `t` | Direction | Payload | Meaning |
+|-----|-----------|---------|---------|
+| `join` | client → server | `{ code, role: 'host' \| 'guest' }` | Request to open (host) or join (guest) a room |
+| `leave` | client → server | — | Leave the current room |
+| `data` | client → server | `{ msg }` | Opaque game message to forward to the other peer |
+| `joined` | server → client | `{ peerId, role, peers: [{ peerId, role }] }` | Confirmed membership in the room |
+| `peer-join` | server → client | `{ peerId, role }` | Another peer joined |
+| `peer-leave` | server → client | `{ peerId }` | A peer disconnected |
+| `data` | server → client | `{ from, msg }` | Relayed game message from the other peer |
+| `error` | server → client | `{ reason }` | Invalid JSON, invalid room code, room full, not in a room, unknown type |
+
+**Room assignment:** the first peer to `join` a code becomes the **host**; the second becomes the **guest**. A third join is rejected with `{ t: 'error', reason: 'room full' }`.
+
+**Relay behavior:** a `data` message from one peer is forwarded only to the *other* peer in the room, wrapped as `{ t: 'data', from: <senderPeerId>, msg: <original msg> }`. The `msg` payload is the game-level `SyncMessage` defined in `SyncMessages.ts`.
+
+### Host Creation / Join Process
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                      ROOM CREATION FLOW                          │
 └──────────────────────────────────────────────────────────────────┘
 
-Host Client                              Trystero Signaling
+Host Client                              Relay Server
     │                                           │
     │  1. hostGame()                            │
     │  ─────────────────────────────────────►   │
-    │     (appId: hell-fire-coop,         │
-    │      roomCode: generated)                 │
+    │     (WS connect, then                     │
+    │      {t:'join', code, role:'host'})       │
     │                                           │
-    │  2. Room Created                          │
+    │  2. {t:'joined', peerId, role:'host'}     │
     │  ◄─────────────────────────────────────   │
     │                                           │
     │  3. State: 'waiting'                      │
@@ -82,70 +117,36 @@ Host Client                              Trystero Signaling
     │                                           │
 ```
 
-**Room Code Generation:**
-- 6 characters from charset: `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`
-- Excludes ambiguous characters (0, O, I, 1, L)
-- Example: `X7K3NP`
-
-### Join Process
+**Room Code Generation** (client): 6 chars from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` (see above).
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                        JOIN FLOW                                 │
 └──────────────────────────────────────────────────────────────────┘
 
-Guest Client                             Trystero Signaling
+Guest Client                             Relay Server
     │                                           │
     │  1. joinGame(roomCode)                    │
     │  ─────────────────────────────────────►   │
-    │     State: 'connecting'                   │
+    │     (WS connect, then                     │
+    │      {t:'join', code, role:'guest'})      │
     │                                           │
-    │  2. Room Lookup                           │
+    │  2. {t:'joined', role:'guest', peers:[host]}│
     │  ◄─────────────────────────────────────   │
+    │     + {t:'peer-join'} to host              │
     │                                           │
-    │  3. WebRTC Handshake begins               │
-    │     (see next section)                    │
+    │  3. State: 'connected'                     │
     │                                           │
 ```
 
-### WebRTC Handshake
+### Reconnection
 
-The WebRTC connection is established through Trystero's signaling:
+The client supports automatic reconnection. `NetworkManager` keeps the active `roomCode` and role, and on socket `close` (unless the disconnect was intentional) it:
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                    WEBRTC HANDSHAKE                              │
-└──────────────────────────────────────────────────────────────────┘
-
-   Host                    Signaling                    Guest
-    │                         │                           │
-    │                         │  1. Guest joins room      │
-    │                         │◄──────────────────────────│
-    │                         │                           │
-    │  2. SDP Offer           │                           │
-    │◄────────────────────────│                           │
-    │                         │                           │
-    │  3. SDP Answer          │                           │
-    │────────────────────────►│                           │
-    │                         │────────────────────────►  │
-    │                         │                           │
-    │  4. ICE Candidates exchanged                        │
-    │◄───────────────────────────────────────────────────►│
-    │                         │                           │
-    │  5. P2P Connection Established                      │
-    │◄═══════════════════════════════════════════════════►│
-    │         (Direct DataChannel)                        │
-    │                         │                           │
-    │  6. onPeerJoin triggered                            │
-    │         State: 'connected'                          │
-    │                         │                           │
-```
-
-**Connection Timeout:** 15 seconds for guest join attempt
-
-### Reconnection Handling
-
-The system includes automatic reconnection for dropped connections:
+1. Sets state to `reconnecting`.
+2. Waits `RECONNECT_DELAY_MS` (2000ms).
+3. Re-opens the WebSocket and re-sends `{ t: 'join', code, role }` for the **same room and role** — the relay treats this as a fresh connection (host returns to `waiting`, guest re-discovers the host).
+4. Retries up to `MAX_RECONNECT_ATTEMPTS` (5); each attempt has a 10s (`waitForJoined`) timeout.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -155,7 +156,7 @@ The system includes automatic reconnection for dropped connections:
    Host                                             Guest
     │                                                  │
     │  1. Connection Lost                              │
-    │     onPeerLeave() triggered                      │
+    │     onPeerLeave() triggered (peer-leave)         │
     │                                                  │
     │  2. State: 'waiting'                             │
     │     (Shows "Waiting for                          │
@@ -164,8 +165,8 @@ The system includes automatic reconnection for dropped connections:
     │                               3. State: 'reconnecting'
     │                                  attemptReconnect()
     │                                                  │
-    │                               4. Leave old room  │
-    │                                  Join same code  │
+    │                               4. Re-open WS      │
+    │                                  Re-join same code/role
     │                                                  │
     │  5. onPeerJoin()                                 │
     │◄════════════════════════════════════════════════►│
@@ -179,11 +180,43 @@ The system includes automatic reconnection for dropped connections:
 - `RECONNECT_DELAY_MS`: 2000ms (2 seconds between attempts)
 - Reconnect timeout per attempt: 10 seconds
 
+### Dungeon Seeding
+
+Both clients must explore the **same dungeon**. `src/scenes/game/GameSceneInit.ts` seeds the `DungeonGenerator` with the room code when in multiplayer:
+
+```typescript
+// GameSceneInit.ts
+const dungeonSeed = networkManager.isMultiplayer ? networkManager.roomCode : undefined;
+const dungeonGenerator = new DungeonGenerator(DUNGEON_WIDTH, DUNGEON_HEIGHT, dungeonSeed ?? undefined);
+```
+
+Because the room code is identical on both clients and the generator is deterministic, both sides build an identical dungeon without transmitting the full layout over the network.
+
+---
+
+## Server URL Selection
+
+`NetworkManager.signalUrl()` picks the relay WebSocket URL using the following precedence (first match wins):
+
+1. **`VITE_SERVER_URL`** — Vite build-time env override.
+2. **`CAPACITOR_SERVER_URL`** — present when running inside a Capacitor native shell.
+3. **In-memory override** — `NetworkManager.setServerUrl(url)` / `getServerUrlOverride()` (also persisted to `localStorage`).
+4. **`SettingsManager.getServerUrl()`** — user setting from the Co-op Server UI.
+5. **`localStorage['hell_fire_relay_url']`** — last manually entered relay URL.
+6. **Automatic default**:
+   - On `localhost` / `127.0.0.1` → `ws://<host>:3001` (the standalone dev relay).
+   - On a hosted site → **same origin**, using `wss:` when the page is HTTPS and `ws:` otherwise: `${proto}//${location.host}`. This is why the combined `server/index.ts` works out of the box — the game is served by the same process that runs the relay.
+
+**Co-op Server presets (Settings UI):**
+- **LOCAL** — clears the configured URL and falls back to automatic (dev) selection.
+- **PUBLIC** — sets the URL to the relay bundled with the hosted site (same origin).
+- **PRIVATE** — prompts the player to enter their own relay URL (e.g. `wss://my-server.com`).
+
 ---
 
 ## Message Types Reference
 
-All messages are defined in `SyncMessages.ts` and transmitted via the Trystero `sync` action.
+All game-level messages are defined in `SyncMessages.ts` and transmitted inside the relay `data` envelope (`{ t: 'data', msg: <SyncMessage> }`). The relay forwards them opaquely; only the host/guest controllers interpret them.
 
 ### Host to Guest Messages
 
@@ -254,6 +287,9 @@ Notification that an enemy has died.
 | `type` | `MessageType.ENEMY_DEATH` | Message identifier |
 | `id` | `string` | Dead enemy's identifier |
 | `killerPlayerId` | `string` | ID of player who killed it |
+| `enemyType` | `string` | Enemy class type |
+| `x` | `number` | Death X position |
+| `y` | `number` | Death Y position |
 
 **Sent:** When enemy HP reaches 0
 **Purpose:** Guest removes enemy sprite and plays death effects
@@ -441,6 +477,22 @@ Player hit an enemy.
 
 ---
 
+#### `DAMAGE_NUMBER`
+Floating damage number to render.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `MessageType.DAMAGE_NUMBER` | Message identifier |
+| `x` | `number` | X position |
+| `y` | `number` | Y position |
+| `damage` | `number` | Damage amount |
+| `isPlayerDamage` | `boolean` | `true` if damage to player, `false` if to enemy |
+
+**Sent By:** Both directions
+**Purpose:** Render consistent floating damage text on both clients
+
+---
+
 #### `PICKUP`
 Player picked up loot.
 
@@ -481,6 +533,155 @@ Player used a consumable item.
 
 ---
 
+#### `COMBO_UPDATE`
+Co-op combo counter update.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `MessageType.COMBO_UPDATE` | Message identifier |
+| `count` | `number` | Combo count |
+| `lastKiller` | `string` | `'host'` or `'guest'` |
+| `x` | `number` | X position |
+| `y` | `number` | Y position |
+
+**Sent By:** Both directions
+
+---
+
+#### `PLAYER_DOWNED`
+A player was downed (revive system).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `MessageType.PLAYER_DOWNED` | Message identifier |
+| `playerId` | `string` | `'host'` or `'guest'` |
+| `x` | `number` | X position |
+| `y` | `number` | Y position |
+
+**Sent By:** The downed player's client; the host processes it authoritatively.
+
+---
+
+#### `REVIVE_PROGRESS`
+Revive progress tick.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `MessageType.REVIVE_PROGRESS` | Message identifier |
+| `targetPlayerId` | `string` | Player being revived |
+| `progress` | `number` | 0 to 1 |
+
+**Sent By:** Host (authoritative revive progress).
+
+---
+
+#### `REVIVE_COMPLETE`
+Revive finished.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `MessageType.REVIVE_COMPLETE` | Message identifier |
+| `targetPlayerId` | `string` | Player revived |
+| `x` | `number` | X position |
+| `y` | `number` | Y position |
+
+**Sent By:** Host.
+
+---
+
+#### `PING_MARKER`
+Co-op ping/marker.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `MessageType.PING_MARKER` | Message identifier |
+| `senderId` | `string` | Sender peer id |
+| `x` | `number` | X position |
+| `y` | `number` | Y position |
+| `pingType` | `'alert' \| 'move' \| 'enemy'` | Marker type |
+
+**Sent By:** Both directions
+
+---
+
+#### `XP_GAINED`
+Shared XP gained.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `MessageType.XP_GAINED` | Message identifier |
+| `amount` | `number` | XP amount |
+| `enemyType` | `string` | Source enemy type |
+| `x` | `number` | X position |
+| `y` | `number` | Y position |
+| `totalXp` | `number` | Total XP |
+| `xpToNext` | `number` | XP needed for next level |
+
+**Sent By:** Both directions
+
+---
+
+#### `EMOTE`
+Quick emote.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `MessageType.EMOTE` | Message identifier |
+| `senderId` | `string` | Sender peer id |
+| `emoteType` | `'wave' \| 'thumbsUp' \| 'help' \| 'follow' \| 'wait' \| 'cheer'` | Emote type |
+| `x` | `number` | X position |
+| `y` | `number` | Y position |
+
+**Sent By:** Both directions
+
+---
+
+#### `LEVEL_UP`
+Player levelled up.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `MessageType.LEVEL_UP` | Message identifier |
+| `playerId` | `string` | Player who levelled up |
+| `newLevel` | `number` | New level |
+| `x` | `number` | X position |
+| `y` | `number` | Y position |
+
+**Sent By:** Both directions
+
+---
+
+#### `HEALTH_PICKUP`
+Health pickup sync.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `MessageType.HEALTH_PICKUP` | Message identifier |
+| `playerId` | `string` | Player id |
+| `amount` | `number` | Amount healed |
+| `newHp` | `number` | New HP |
+| `maxHp` | `number` | Maximum HP |
+| `x` | `number` | X position |
+| `y` | `number` | Y position |
+
+**Sent By:** Both directions
+
+---
+
+#### `DUO_KILL`
+Duo kill celebration.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `MessageType.DUO_KILL` | Message identifier |
+| `enemyType` | `string` | Enemy type |
+| `x` | `number` | X position |
+| `y` | `number` | Y position |
+
+**Sent By:** Both directions
+
+---
+
 ## State Synchronization
 
 ### What State is Synced
@@ -496,7 +697,7 @@ Player used a consumable item.
 | Loot Items | Yes | Host | On event |
 | Inventory | Yes | Host | On change |
 | Room State | Yes | Host | On event |
-| Dungeon Layout | Yes | Host | On connect |
+| Dungeon Layout | Yes | Host (seeded by room code) | On connect |
 
 ### Sync Frequency
 
@@ -549,7 +750,7 @@ guestEnemy.sprite.y = Phaser.Math.Linear(guestEnemy.sprite.y, enemyData.y, 0.3);
 
 The host maintains the single source of truth for:
 
-- **Dungeon generation** - Room layouts, connections, decorations
+- **Dungeon generation** - Room layouts, connections, decorations (seeded from the room code)
 - **Enemy spawning** - When, where, and what type
 - **Damage application** - Final say on HP changes
 - **Loot drops** - Item generation and placement
@@ -696,7 +897,7 @@ Guest receives and applies these state updates:
 
 ## Anti-Cheat Validation
 
-The host performs several validations to prevent cheating.
+The host performs several validations to prevent cheating. All constants live in `MessageValidator.ts`.
 
 ### Damage Limits
 
@@ -804,23 +1005,27 @@ export function validateRoomCode(code: string): ValidationResult {
 │                    COMPLETE CONNECTION SEQUENCE                          │
 └──────────────────────────────────────────────────────────────────────────┘
 
-   Host                    Trystero                    Guest
+   Host                    Relay                    Guest
     │                         │                           │
     │  hostGame()             │                           │
+    │  WS connect             │                           │
+    │  {t:'join', code,       │                           │
+    │   role:'host'}          │                           │
     │────────────────────────►│                           │
     │                         │                           │
-    │  roomCode: "X7K3NP"     │                           │
+    │  {t:'joined', role:     │                           │
+    │   'host'}               │                           │
     │◄────────────────────────│                           │
     │                         │                           │
     │  State: 'waiting'       │                           │
     │  Display code to user   │                           │
-    │                         │                           │
-    │                         │           joinGame("X7K3NP")
+    │                         │           WS connect      │
+    │                         │           {t:'join', code,│
+    │                         │            role:'guest'}   │
     │                         │◄──────────────────────────│
     │                         │                           │
-    │       ═══════════════ WebRTC Handshake ═══════════════
-    │                         │                           │
-    │  onPeerJoin(guestId)    │      onPeerJoin(hostId)   │
+    │  {t:'peer-join'}        │      {t:'joined', role:   │
+    │                         │       'guest', peers:[host]}
     │◄────────────────────────┼──────────────────────────►│
     │                         │                           │
     │  State: 'connected'     │        State: 'connected' │
@@ -928,7 +1133,7 @@ export function validateRoomCode(code: string): ValidationResult {
     │                                                  │
     │  ═══════════ CONNECTION LOST ═══════════════════
     │                                                  │
-    │  onPeerLeave()                                   │
+    │  onPeerLeave() (peer-leave)                      │
     │  State: 'waiting'                                │
     │  showWaitingUI()                                 │
     │                                                  │
@@ -938,11 +1143,10 @@ export function validateRoomCode(code: string): ValidationResult {
     │                                                  │
     │                               Attempt 1/5        │
     │                               Wait 2000ms        │
-    │                               rejoinRoom()       │
+    │                               Re-open WS,        │
+    │                               re-join room/role  │
     │                                                  │
-    │       ═══════════════ WebRTC Handshake ═══════════════
-    │                                                  │
-    │  onPeerJoin()                  onPeerJoin()      │
+    │  {t:'peer-join'}              {t:'joined'}       │
     │  State: 'connected'            State: 'connected'│
     │                                                  │
     │  hideWaitingUI()               hideReconnectUI() │
@@ -961,7 +1165,8 @@ export function validateRoomCode(code: string): ValidationResult {
 
 | File | Purpose |
 |------|---------|
-| `NetworkManager.ts` | Connection management, Trystero integration |
+| `server/index.ts` | Combined static game host + WebSocket relay (same port) |
+| `src/multiplayer/NetworkManager.ts` | WebSocket client: connection lifecycle, room join/leave, auto-reconnect, URL selection |
 | `SyncMessages.ts` | Message type definitions and interfaces |
 | `PlayerSync.ts` | Local player position broadcasting |
 | `RemotePlayer.ts` | Remote player sprite with interpolation |
@@ -976,7 +1181,9 @@ export function validateRoomCode(code: string): ValidationResult {
 
 | Constant | Value | Location | Purpose |
 |----------|-------|----------|---------|
-| `APP_ID` | `hell-fire-coop` | NetworkManager | Trystero app identifier |
+| `RELAY_PORT` | `3001` (env `PORT`) | server/index.ts | Relay + static host port |
+| `ROOM_CODE_CHARS` | `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` | NetworkManager.generateRoomCode | Room code charset |
+| `ROOM_CODE_REGEX` (server) | `/^[A-HJ-NP-Z2-9]{6}$/` | server/index.ts | Server-side room code validation |
 | `SEND_INTERVAL_MS` | 50 | PlayerSync | Position update rate |
 | `POSITION_THRESHOLD` | 2 | PlayerSync | Min position delta to send |
 | `LERP_SPEED` | 0.3 | RemotePlayer | Interpolation factor |
@@ -986,3 +1193,5 @@ export function validateRoomCode(code: string): ValidationResult {
 | `RECONNECT_DELAY_MS` | 2000 | NetworkManager | Delay between attempts |
 | `MAX_DAMAGE_PER_HIT` | 1000 | MessageValidator | Anti-cheat limit |
 | `MAX_POSITION_DELTA` | 100 | MessageValidator | Anti-cheat limit |
+| `VALID_ROOM_CODE_REGEX` | `/^[A-Z0-9]{4,8}$/` | MessageValidator | Client-side room code validation |
+| `MAX_MESSAGES_PER_SECOND` | 100 | MessageValidator | Rate-limit (flood protection) |

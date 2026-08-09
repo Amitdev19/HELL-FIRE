@@ -7,6 +7,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest",
+    "test:run": "vitest run",
     "preview": "vite preview",
     "quantize": "node scripts/quantize-palette.cjs",
     "server": "tsx server/index.ts",
@@ -33,6 +36,7 @@
     "sharp": "^0.34.5",
     "tsx": "^4.19.2",
     "typescript": "^5.3.3",
-    "vite": "^5.4.11"
+    "vite": "^5.4.11",
+    "vitest": "^2.1.0"
   }
 }

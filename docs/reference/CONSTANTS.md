@@ -213,10 +213,10 @@ Constants from `src/utils/constants.ts`:
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `APP_ID` | `'hell-fire-coop'` | Trystero room identifier |
+| `APP_ID` | `'hell-fire-coop'` | **Removed/deprecated.** Former Trystero app identifier; the current self-hosted WebSocket relay (`server/index.ts` + `NetworkManager.ts`) does not use Trystero or an app ID. |
 | Room Code Length | `6` characters | Alphanumeric (no ambiguous chars) |
-| Connection Timeout | `15000ms` | Initial connection timeout |
-| Reconnect Timeout | `10000ms` | Per-attempt reconnect timeout |
+| Connection Timeout | `15000ms` | Initial connection timeout (`joinGame`) |
+| Reconnect Timeout | `10000ms` | Per-attempt reconnect timeout (`waitForJoined`) |
 | Max Reconnect Attempts | `5` | Before giving up |
 | Reconnect Delay | `2000ms` | Delay between attempts |
 
@@ -231,9 +231,9 @@ Constants from `src/utils/constants.ts`:
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| Max Damage | `9999` | Maximum single damage value |
-| Position Delta | `1000` | Maximum position change per update |
-| Room Code Pattern | `^[A-Z0-9]{4,8}$` | Valid room code regex |
+| Max Damage | `1000` | Maximum single damage value (`MAX_DAMAGE_PER_HIT`) |
+| Position Delta | `100` | Maximum position change per update (`MAX_POSITION_DELTA`) |
+| Room Code Pattern | `^[A-Z0-9]{4,8}$` | Valid room code regex (`VALID_ROOM_CODE_REGEX`) |
 
 ---
 

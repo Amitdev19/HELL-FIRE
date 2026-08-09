@@ -2,7 +2,7 @@
 
 ![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=flat&logo=typescript&logoColor=white)
 ![Phaser 3](https://img.shields.io/badge/Phaser_3-00BFFF?style=flat&logo=phaser&logoColor=white)
-![WebRTC](https://img.shields.io/badge/WebRTC-333333?style=flat&logo=webrtc&logoColor=white)
+![WebSocket](https://img.shields.io/badge/WebSocket-333333?style=flat&logo=websocket&logoColor=white)
 
 Complete API reference for the multiplayer networking system used in HELL FIRE.
 
@@ -28,26 +28,26 @@ Complete API reference for the multiplayer networking system used in HELL FIRE.
 
 ## Architecture Overview
 
-The multiplayer system uses a **host-authoritative** architecture built on [Trystero](https://github.com/dmotz/trystero) for WebRTC peer-to-peer connections.
+The multiplayer system uses a **host-authoritative** architecture built on our **self-hosted WebSocket relay** (`server/index.ts`). The browser `NetworkManager` connects to that relay via `WebSocket` and exchanges JSON envelopes; it does not use WebRTC or any third-party P2P service.
 
 ```
-┌─────────────────┐                    ┌─────────────────┐
-│      HOST       │                    │      GUEST      │
-│                 │                    │                 │
-│ ┌─────────────┐ │  WebRTC (P2P)      │ ┌─────────────┐ │
-│ │HostController│◄─────────────────────►│GuestController│
-│ └─────────────┘ │                    │ └─────────────┘ │
-│        │        │                    │        │        │
-│        ▼        │                    │        ▼        │
-│ ┌─────────────┐ │                    │ ┌─────────────┐ │
-│ │ PlayerSync  │ │                    │ │ PlayerSync  │ │
-│ └─────────────┘ │                    │ └─────────────┘ │
-│        │        │                    │        │        │
-│        ▼        │                    │        ▼        │
-│ ┌─────────────┐ │                    │ ┌─────────────┐ │
-│ │NetworkManager│◄────────────────────►│NetworkManager │
-│ └─────────────┘ │                    │ └─────────────┘ │
-└─────────────────┘                    └─────────────────┘
+┌─────────────────┐                    ┌──────────────────────┐      ┌─────────────────┐
+│      HOST       │                    │      RELAY           │      │      GUEST      │
+│                 │                    │                      │      │                 │
+│ ┌─────────────┐ │   WebSocket (ws)  │ ┌──────────────────┐ │      │ ┌─────────────┐ │
+│ │HostController│◄─────────────────────►││WebSocket relay   │◄─────►│ │GuestController│
+│ └─────────────┘ │                    │ │(server/index.ts) │ │      │ └─────────────┘ │
+│        │        │                    │ └──────────────────┘ │      │        │        │
+│        ▼        │                    │                      │      │        ▼        │
+│ ┌─────────────┐ │                    │                      │      │ ┌─────────────┐ │
+│ │ PlayerSync  │ │                    │                      │      │ │ PlayerSync  │ │
+│ └─────────────┘ │                    │                      │      │ └─────────────┘ │
+│        │        │                    │                      │      │        │        │
+│        ▼        │                    │                      │      │        ▼        │
+│ ┌─────────────┐ │                    │                      │      │ ┌─────────────┐ │
+│ │NetworkManager│◄────────────────────►│                      │      │ │NetworkManager│
+│ └─────────────┘ │                    │                      │      │ └─────────────┘ │
+└─────────────────┘                    └──────────────────────┘      └─────────────────┘
 ```
 
 **Key Concepts:**
@@ -61,7 +61,7 @@ The multiplayer system uses a **host-authoritative** architecture built on [Trys
 
 ## NetworkManager
 
-The core networking class that manages WebRTC connections via Trystero.
+The core networking class that manages WebSocket connections to the self-hosted relay.
 
 **File:** `src/multiplayer/NetworkManager.ts`
 
@@ -200,7 +200,7 @@ networkManager.disconnect();
 ```
 
 **Effects:**
-- Leaves the Trystero room
+- Leaves the relay room
 - Clears all message listeners
 - Resets connection state to `disconnected`
 - Cancels any pending reconnection attempts

@@ -115,8 +115,9 @@ function removeFromRoom(client: Client): void {
 // ---------------------------------------------------------------------------
 function safeJoin(base: string, target: string): string | null {
   const p = path.normalize(path.join(base, target));
-  if (!p.startsWith(base)) return null; // block path traversal
-  return p;
+  const rel = path.relative(base, p);
+  if (rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)) return p;
+  return null;
 }
 
 function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): void {

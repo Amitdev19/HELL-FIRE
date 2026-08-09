@@ -134,6 +134,8 @@ export class HostController {
       this.handleEnemyDeath(enemy);
     });
 
+    this.scene.events.on('hostPlayerHit', this.onHostPlayerHit, this);
+
     // Listen for loot drops to sync with guest
     this.scene.events.on('lootSpawned', (lootId: string, type: string, x: number, y: number, data: string) => {
       this.broadcastLootSpawn(lootId, type, x, y, data);
@@ -487,7 +489,7 @@ export class HostController {
     });
   }
 
-  // Called when host damages an enemy
+    // Called when host damages an enemy
   trackHostHit(enemy: Enemy): void {
     const enemyId = this.enemyIdMap.get(enemy);
     if (enemyId) {
@@ -499,6 +501,10 @@ export class HostController {
       }
       this.dualHittersMap.get(enemyId)!.add('host');
     }
+  }
+
+  private onHostPlayerHit(enemy: Enemy): void {
+    this.trackHostHit(enemy);
   }
 
   private broadcastLootSpawn(lootId: string, type: string, x: number, y: number, data: string): void {
@@ -1905,6 +1911,7 @@ export class HostController {
 
     // Remove scene event listeners
     this.scene.events.off('enemyDeath');
+    this.scene.events.off('hostPlayerHit', this.onHostPlayerHit, this);
     this.scene.events.off('lootSpawned');
     this.scene.events.off('roomCleared');
 

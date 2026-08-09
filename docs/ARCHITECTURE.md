@@ -123,7 +123,7 @@ Game Start → SaveSystem.load() → Player.restoreFromSave()
 ```
 Host: Player Input → Game State Change → HostController.broadcast()
         ↓
-Network: Trystero WebRTC P2P
+Network: Self-hosted WebSocket relay (server/index.ts + NetworkManager.ts)
         ↓
 Guest: NetworkManager.onMessage() → GuestController.handle() → Update Visuals
 ```
